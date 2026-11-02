@@ -1055,7 +1055,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "nexum-audit",
  "nexum-core",
@@ -1078,7 +1078,7 @@ dependencies = [
 name = "nexum-grant"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "ed25519-dalek",
  "nexum-core",
