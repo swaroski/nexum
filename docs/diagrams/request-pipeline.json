@@ -1,0 +1,447 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Nexum request pipeline",
+    "output": "docs/diagrams/request-pipeline.html",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/swaroski/nexum.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "caa906a825639bdce3a6be8849cef8901279935b"
+    },
+    "subtitle": "Every check is deterministic; any failure is DENY",
+    "legend": {
+      "entries": {
+        "external": {
+          "label": "Calling agent"
+        },
+        "frontend": {
+          "label": "Protocol adapter"
+        },
+        "security": {
+          "label": "Security check / outcome"
+        },
+        "backend": {
+          "label": "Authorization step"
+        },
+        "messagebus": {
+          "label": "Pending outcome"
+        },
+        "database": {
+          "label": "Audit store"
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "fail",
+      "label": "Fail closed",
+      "variant": "exception"
+    },
+    {
+      "id": "pipe",
+      "label": "Request pipeline"
+    },
+    {
+      "id": "outcome",
+      "label": "Decision"
+    },
+    {
+      "id": "evidence",
+      "label": "Evidence"
+    }
+  ],
+  "phases": [
+    {
+      "id": "p-in",
+      "label": "Normalize",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "p-verify",
+      "label": "Verify authority",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "security"
+    },
+    {
+      "id": "p-decide",
+      "label": "Decide + record",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "emphasis"
+    }
+  ],
+  "mainPath": [
+    "agent",
+    "adapter",
+    "chain",
+    "proof",
+    "authority",
+    "policy",
+    "allow",
+    "audit"
+  ],
+  "nodes": [
+    {
+      "id": "agent",
+      "lane": "pipe",
+      "col": 0,
+      "type": "external",
+      "label": "Agent request",
+      "sublabel": "grant chain + fresh proof",
+      "sources": [
+        {
+          "path": "examples/python/nexum_client.py",
+          "line": 69,
+          "end_line": 96,
+          "label": "signs proof per request"
+        }
+      ]
+    },
+    {
+      "id": "adapter",
+      "lane": "pipe",
+      "col": 1,
+      "type": "frontend",
+      "label": "Adapter",
+      "sublabel": "REST / MCP / A2A \u2192 action",
+      "sources": [
+        {
+          "path": "crates/nexum-gateway/src/server.rs",
+          "line": 92,
+          "end_line": 101,
+          "label": "REST normalize"
+        },
+        {
+          "path": "crates/nexum-gateway/src/server.rs",
+          "line": 140,
+          "end_line": 208,
+          "label": "MCP/A2A proxy"
+        }
+      ]
+    },
+    {
+      "id": "chain",
+      "lane": "pipe",
+      "col": 2,
+      "type": "security",
+      "label": "Delegation chain",
+      "sublabel": "signed \u00b7 attenuated \u00b7 unrevoked",
+      "sources": [
+        {
+          "path": "crates/nexum-grant/src/verify.rs",
+          "line": 176,
+          "end_line": 254,
+          "label": "verify_chain"
+        },
+        {
+          "path": "crates/nexum-grant/src/grant.rs",
+          "line": 139,
+          "end_line": 174,
+          "label": "attenuation rules"
+        }
+      ]
+    },
+    {
+      "id": "proof",
+      "lane": "pipe",
+      "col": 3,
+      "type": "security",
+      "label": "Proof of possession",
+      "sublabel": "this body \u00b7 single use",
+      "sources": [
+        {
+          "path": "crates/nexum-grant/src/verify.rs",
+          "line": 257,
+          "end_line": 292,
+          "label": "verify_proof"
+        }
+      ]
+    },
+    {
+      "id": "authority",
+      "lane": "pipe",
+      "col": 4,
+      "type": "backend",
+      "label": "Authority & trust",
+      "sublabel": "in grant? partner accepts?",
+      "sources": [
+        {
+          "path": "crates/nexum-gateway/src/authorizer.rs",
+          "line": 225,
+          "end_line": 244,
+          "label": "grant scope + trust"
+        },
+        {
+          "path": "crates/nexum-grant/src/trust.rs",
+          "line": 77,
+          "end_line": 80,
+          "label": "accepts"
+        }
+      ]
+    },
+    {
+      "id": "policy",
+      "lane": "pipe",
+      "col": 5,
+      "type": "backend",
+      "label": "Policy",
+      "sublabel": "deny-overrides, default deny",
+      "sources": [
+        {
+          "path": "crates/nexum-policy/src/lib.rs",
+          "line": 195,
+          "end_line": 246,
+          "label": "PolicySet::evaluate"
+        },
+        {
+          "path": "crates/nexum-gateway/src/authorizer.rs",
+          "line": 246,
+          "end_line": 253,
+          "label": "PDP error \u2192 deny"
+        }
+      ]
+    },
+    {
+      "id": "approval",
+      "lane": "outcome",
+      "col": 4,
+      "type": "security",
+      "label": "Human approval",
+      "sublabel": "request-bound, single use",
+      "sources": [
+        {
+          "path": "crates/nexum-gateway/src/authorizer.rs",
+          "line": 267,
+          "end_line": 313,
+          "label": "create or consume"
+        },
+        {
+          "path": "crates/nexum-gateway/src/store.rs",
+          "line": 206,
+          "end_line": 213,
+          "label": "atomic consume"
+        }
+      ]
+    },
+    {
+      "id": "allow",
+      "lane": "outcome",
+      "col": 5,
+      "type": "backend",
+      "label": "ALLOW",
+      "sublabel": "forward or 200",
+      "sources": [
+        {
+          "path": "crates/nexum-gateway/src/server.rs",
+          "line": 140,
+          "end_line": 208,
+          "label": "forward if allowed"
+        }
+      ]
+    },
+    {
+      "id": "deny",
+      "lane": "fail",
+      "col": 3,
+      "type": "security",
+      "label": "DENY",
+      "sublabel": "stable NX-xxxx reason",
+      "sources": [
+        {
+          "path": "crates/nexum-gateway/src/authorizer.rs",
+          "line": 174,
+          "end_line": 179,
+          "label": "deny + record"
+        }
+      ]
+    },
+    {
+      "id": "hold",
+      "lane": "outcome",
+      "col": 3,
+      "type": "messagebus",
+      "label": "REQUIRE_APPROVAL",
+      "sublabel": "approval id returned",
+      "sources": [
+        {
+          "path": "crates/nexum-gateway/src/authorizer.rs",
+          "line": 286,
+          "end_line": 312,
+          "label": "pending approval"
+        }
+      ]
+    },
+    {
+      "id": "audit",
+      "lane": "evidence",
+      "col": 5,
+      "type": "database",
+      "label": "Audit log",
+      "sublabel": "hash-chained, one per decision",
+      "sources": [
+        {
+          "path": "crates/nexum-gateway/src/authorizer.rs",
+          "line": 122,
+          "end_line": 129,
+          "label": "write fails \u2192 deny"
+        },
+        {
+          "path": "crates/nexum-audit/src/lib.rs",
+          "line": 223,
+          "end_line": 253,
+          "label": "chained append"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-send",
+      "from": "agent",
+      "to": "adapter",
+      "label": "POST",
+      "variant": "default"
+    },
+    {
+      "id": "e-norm",
+      "from": "adapter",
+      "to": "chain",
+      "label": "normalized",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e-chain-ok",
+      "from": "chain",
+      "to": "proof",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e-proof-ok",
+      "from": "proof",
+      "to": "authority",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e-auth-ok",
+      "from": "authority",
+      "to": "policy",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e-allow",
+      "from": "policy",
+      "to": "allow",
+      "label": "allow",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e-needs",
+      "from": "policy",
+      "to": "approval",
+      "label": "approval",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "e-approved",
+      "from": "approval",
+      "to": "allow",
+      "label": "consumed",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "e-pending",
+      "from": "approval",
+      "to": "hold",
+      "label": "none yet",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "e-chain-fail",
+      "from": "chain",
+      "to": "deny",
+      "variant": "security",
+      "role": "error",
+      "toSide": "bottom"
+    },
+    {
+      "id": "e-proof-fail",
+      "from": "proof",
+      "to": "deny",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "e-auth-fail",
+      "from": "authority",
+      "to": "deny",
+      "variant": "security",
+      "role": "error",
+      "toSide": "bottom"
+    },
+    {
+      "id": "e-policy-fail",
+      "from": "policy",
+      "to": "deny",
+      "label": "deny",
+      "variant": "security",
+      "role": "error",
+      "toSide": "bottom",
+      "fromSide": "top"
+    },
+    {
+      "id": "e-record-allow",
+      "from": "allow",
+      "to": "audit",
+      "label": "record",
+      "variant": "dashed",
+      "role": "async"
+    },
+    {
+      "id": "e-record-hold",
+      "from": "hold",
+      "to": "audit",
+      "variant": "dashed",
+      "role": "async"
+    },
+    {
+      "id": "e-record-deny",
+      "from": "deny",
+      "to": "audit",
+      "variant": "dashed",
+      "role": "async",
+      "fromSide": "right",
+      "toSide": "right",
+      "route": "outside-right"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Fail closed",
+      "items": [
+        "Every check that fails returns DENY with one stable NX-xxxx code",
+        "PDP errors and approval-store errors deny as well",
+        "An audit write failure turns any decision into DENY"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Neutral core",
+      "items": [
+        "Adapters only describe the message; they never decide",
+        "The pipeline sees identity, delegation, action, resource and policy only"
+      ]
+    }
+  ]
+}

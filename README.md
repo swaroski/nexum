@@ -208,84 +208,46 @@ It is single-replica on purpose in v0.1 (replay cache and state are per instance
 
 ### Every request, eight deterministic checks
 
-```mermaid
-flowchart TD
-    REQ(["📨 Request<br/>Nexum-Grant · Nexum-Proof · body"]) --> N
-    N["1 · Normalize<br/>REST / MCP / A2A → action, resource, value"] --> C
-    C{"2 · Delegation chain<br/>signed · attenuated · unexpired<br/>audience · not revoked"} -->|fail| D
-    C --> P{"3 · Proof of possession<br/>holder key · this body · this gateway<br/>fresh · single use"}
-    P -->|fail| D
-    P --> A{"4 · Chain authority<br/>action ∈ grant · resource ∈ grant<br/>value ≤ limit"}
-    A -->|fail| D
-    A --> T{"5 · Trust<br/>does the receiving org accept<br/>this from the issuing org?"}
-    T -->|fail| D
-    T --> POL{"6 · Policy<br/>built-in or OPA / Cedar / …"}
-    POL -->|deny| D
-    POL -->|approval| AP{"7 · Approval<br/>matching & unused?"}
-    POL -->|allow| OK
-    AP -->|no| HOLD(["⏸️ REQUIRE_APPROVAL<br/>approval id issued"])
-    AP -->|yes| OK(["✅ ALLOW"])
-    D(["⛔ DENY + reason code"])
-    OK --> AU[("8 · Hash-chained audit<br/>write fails → DENY")]
-    D --> AU
-    HOLD --> AU
-
-    classDef deny fill:#fde2e1,stroke:#d93025,color:#5c0b07
-    classDef allow fill:#dff5e3,stroke:#1e8e3e,color:#0b3d1a
-    classDef hold fill:#fff4d6,stroke:#f9ab00,color:#5c4400
-    class D deny
-    class OK allow
-    class HOLD hold
-```
+<p align="center">
+  <a href="docs/diagrams/request-pipeline.html">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/request-pipeline.dark.png">
+      <img src="docs/diagrams/request-pipeline.light.png" alt="Nexum request pipeline: adapter, delegation chain, proof of possession, authority and trust, policy, approval, audit; any failure is DENY" width="100%">
+    </picture>
+  </a>
+  <br><sub>Each box links to the code that implements it · <a href="docs/diagrams/request-pipeline.html">interactive version</a> (download and open in a browser) · <a href="docs/diagrams/request-pipeline.json">source</a></sub>
+</p>
 
 Anything unknown, unverifiable or unavailable is a **DENY** with a stable
 reason code (`NX-xxxx`). There is no "warn and continue" path.
 
 ### Delegation only ever narrows
 
-```mermaid
-flowchart LR
-    H["👤 jane@xyz.com"] ==>|"issues root grant"| A
-    A["🤖 procurement<br/>━━━━━━━━━━━━<br/>inventory.read<br/>pricing.read<br/>quote.create<br/>15 min · depth 1"]
-    A ==>|"delegates subset"| B["🤖 inventory-checker<br/>━━━━━━━━━━━━<br/>inventory.read<br/>5 min · depth 0"]
-    B -.->|"✗ cannot add payment.execute"| X1["💳"]
-    B -.->|"✗ cannot delegate further"| X2["🤖"]
-    B -.->|"✗ cannot outlive parent"| X3["⏱️"]
-
-    classDef human fill:#e8f0fe,stroke:#1a73e8,color:#0b2a5c
-    classDef agent fill:#f3e8fd,stroke:#8430ce,color:#3a0f63
-    classDef blocked fill:#fde2e1,stroke:#d93025,color:#5c0b07
-    class H human
-    class A,B agent
-    class X1,X2,X3 blocked
-```
+<p align="center">
+  <a href="docs/diagrams/delegation-chain.html">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/delegation-chain.dark.png">
+      <img src="docs/diagrams/delegation-chain.light.png" alt="Delegation chain: jane@xyz.com, XYZ issuer, procurement agent delegating inventory.read to inventory-checker, ABC gateway allowing inventory reads and blocking payments" width="100%">
+    </picture>
+  </a>
+  <br><sub>Two trust domains, one verifiable chain of authority · <a href="docs/diagrams/delegation-chain.html">interactive version</a> (download and open in a browser) · <a href="docs/diagrams/delegation-chain.json">source</a></sub>
+</p>
 
 `authority(child) ⊆ authority(parent)`, checked on every hop, every request,
-and property-tested.
+and property-tested. A sub-agent can't add capabilities, outlive its parent,
+or re-delegate beyond its depth.
 
 ### Cross-company trust without a middleman
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Jane as 👤 Jane (XYZ)
-    participant XA as 🤖 XYZ procurement agent
-    participant GW as 🛡️ ABC's Nexum gateway
-    participant API as 📦 ABC supplier API
-    actor CFO as 👤 ABC approver
-
-    Note over Jane,GW: One-time: ABC adds XYZ's public key<br/>and allows inventory.read, pricing.read, quote.create
-    Jane->>XA: root grant signed by XYZ (15 min, acting for Jane)
-    XA->>GW: inventory.read + grant chain + fresh proof
-    GW->>GW: verify XYZ signature, attenuation, proof, ABC trust, ABC policy
-    GW->>API: ✅ ALLOW → forward
-    XA->>GW: quote.create, value $250,000
-    GW-->>XA: ⏸️ REQUIRE_APPROVAL (approval id)
-    CFO->>GW: nexum approvals approve {id}
-    XA->>GW: retry with Nexum-Approval: {id}
-    GW->>API: ✅ ALLOW (approval consumed, single use)
-    Note over GW: ABC revokes trust in XYZ → every XYZ grant denied instantly
-```
+<p align="center">
+  <a href="docs/diagrams/cross-company.html">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/cross-company.dark.png">
+      <img src="docs/diagrams/cross-company.light.png" alt="Sequence: XYZ agent calls ABC gateway; ALLOW, then REQUIRE_APPROVAL, approval, ALLOW, then trust revoked and DENY" width="100%">
+    </picture>
+  </a>
+  <br><sub>The demo, step by step · <a href="docs/diagrams/cross-company.html">interactive version</a> (download and open in a browser) · <a href="docs/diagrams/cross-company.json">source</a></sub>
+</p>
 
 XYZ never shares a secret with ABC, and ABC never trusts a third party. Each
 organization stays its own root of trust.

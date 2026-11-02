@@ -1,0 +1,350 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Delegation only narrows",
+    "output": "docs/diagrams/delegation-chain.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/swaroski/nexum.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "caa906a825639bdce3a6be8849cef8901279935b"
+    },
+    "legend": {
+      "entries": {
+        "external": {
+          "label": "Human principal"
+        },
+        "security": {
+          "label": "Root of trust / enforcement"
+        },
+        "backend": {
+          "label": "Agent holding a grant"
+        },
+        "database": {
+          "label": "Trust store"
+        },
+        "cloud": {
+          "label": "Protected API"
+        }
+      }
+    },
+    "subtitle": "XYZ Corporation's agents calling Supplier ABC"
+  },
+  "components": [
+    {
+      "id": "jane",
+      "type": "external",
+      "icon": "person",
+      "label": "jane@xyz.com",
+      "sublabel": "act claim, immutable down the chain",
+      "pos": [
+        40,
+        60
+      ],
+      "size": [
+        200,
+        64
+      ],
+      "sources": [
+        {
+          "path": "crates/nexum-grant/src/grant.rs",
+          "line": 20,
+          "end_line": 25,
+          "label": "Actor (RFC 8693 act)"
+        }
+      ]
+    },
+    {
+      "id": "issuer",
+      "type": "security",
+      "label": "XYZ issuer key",
+      "sublabel": "signs root grants for xyz.com",
+      "pos": [
+        40,
+        250
+      ],
+      "size": [
+        200,
+        64
+      ],
+      "sources": [
+        {
+          "path": "crates/nexum-cli/src/main.rs",
+          "line": 625,
+          "end_line": 678,
+          "label": "grants issue"
+        }
+      ]
+    },
+    {
+      "id": "procurement",
+      "type": "backend",
+      "label": "procurement agent",
+      "sublabel": "inventory.read \u00b7 pricing.read \u00b7 quote.create \u00b7 15 min",
+      "pos": [
+        300,
+        150
+      ],
+      "size": [
+        320,
+        74
+      ],
+      "sources": [
+        {
+          "path": "crates/nexum-grant/src/grant.rs",
+          "line": 33,
+          "end_line": 64,
+          "label": "GrantClaims"
+        },
+        {
+          "path": "examples/cross-company/demo.sh",
+          "line": 51,
+          "end_line": 56,
+          "label": "root grant in demo"
+        }
+      ]
+    },
+    {
+      "id": "checker",
+      "type": "backend",
+      "label": "inventory-checker",
+      "sublabel": "inventory.read only \u00b7 5 min \u00b7 no re-delegation",
+      "pos": [
+        860,
+        150
+      ],
+      "size": [
+        270,
+        74
+      ],
+      "sources": [
+        {
+          "path": "crates/nexum-grant/src/grant.rs",
+          "line": 92,
+          "end_line": 120,
+          "label": "child_claims"
+        },
+        {
+          "path": "crates/nexum-grant/src/grant.rs",
+          "line": 139,
+          "end_line": 174,
+          "label": "attenuation rules"
+        },
+        {
+          "path": "examples/cross-company/demo.sh",
+          "line": 64,
+          "end_line": 67,
+          "label": "delegation in demo"
+        }
+      ]
+    },
+    {
+      "id": "truststore",
+      "type": "database",
+      "label": "ABC trust store",
+      "sublabel": "XYZ key \u00b7 allow / deny list",
+      "pos": [
+        330,
+        450
+      ],
+      "size": [
+        220,
+        64
+      ],
+      "sources": [
+        {
+          "path": "crates/nexum-grant/src/trust.rs",
+          "line": 13,
+          "end_line": 81,
+          "label": "TrustStore"
+        },
+        {
+          "path": "examples/cross-company/demo.sh",
+          "line": 39,
+          "end_line": 41,
+          "label": "trust add xyz.com"
+        }
+      ]
+    },
+    {
+      "id": "gateway",
+      "type": "security",
+      "label": "ABC Nexum gateway",
+      "sublabel": "verifies chain, proof, trust, policy",
+      "pos": [
+        885,
+        450
+      ],
+      "size": [
+        220,
+        64
+      ],
+      "sources": [
+        {
+          "path": "crates/nexum-grant/src/verify.rs",
+          "line": 176,
+          "end_line": 254,
+          "label": "verify_chain"
+        },
+        {
+          "path": "crates/nexum-gateway/src/authorizer.rs",
+          "line": 225,
+          "end_line": 244,
+          "label": "capability in chain?"
+        }
+      ]
+    },
+    {
+      "id": "inventory",
+      "type": "cloud",
+      "label": "Inventory API",
+      "sublabel": "supplier://abc/sku/*",
+      "pos": [
+        885,
+        640
+      ],
+      "size": [
+        220,
+        60
+      ],
+      "sources": [
+        {
+          "path": "examples/cross-company/abc-policy.yaml",
+          "line": 8,
+          "end_line": 11,
+          "label": "inventory-read rule"
+        }
+      ]
+    },
+    {
+      "id": "payments",
+      "type": "cloud",
+      "label": "Payments API",
+      "sublabel": "payment.execute",
+      "pos": [
+        330,
+        640
+      ],
+      "size": [
+        220,
+        60
+      ],
+      "sources": [
+        {
+          "path": "examples/cross-company/abc-policy.yaml",
+          "line": 24,
+          "end_line": 26,
+          "label": "no-payments rule"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "xyz.com trust domain",
+      "wraps": [
+        "jane",
+        "issuer",
+        "procurement",
+        "checker"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "abc.com trust domain",
+      "wraps": [
+        "truststore",
+        "gateway",
+        "inventory",
+        "payments"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "acts-for",
+      "from": "jane",
+      "to": "procurement",
+      "label": "acts for"
+    },
+    {
+      "id": "root-grant",
+      "from": "issuer",
+      "to": "procurement",
+      "label": "root grant",
+      "variant": "security"
+    },
+    {
+      "id": "delegate",
+      "from": "procurement",
+      "to": "checker",
+      "label": "delegates inventory.read",
+      "variant": "emphasis"
+    },
+    {
+      "id": "present",
+      "from": "checker",
+      "to": "gateway",
+      "label": "chain + proof",
+      "variant": "emphasis"
+    },
+    {
+      "id": "pubkey",
+      "from": "issuer",
+      "to": "truststore",
+      "label": "public key, once",
+      "variant": "dashed"
+    },
+    {
+      "id": "trust-lookup",
+      "from": "truststore",
+      "to": "gateway",
+      "label": "who is trusted"
+    },
+    {
+      "id": "allow-read",
+      "from": "gateway",
+      "to": "inventory",
+      "label": "ALLOW read",
+      "variant": "emphasis"
+    },
+    {
+      "id": "deny-pay",
+      "from": "gateway",
+      "to": "payments",
+      "label": "blocked: DENY NX-4032",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "violet",
+      "title": "Attenuation, every hop",
+      "items": [
+        "Child capabilities \u2286 parent's delegatable set; resources, audience \u2286 parent's",
+        "Child expires no later than parent; depth strictly decreases",
+        "Child is signed by the parent's holder key and bound to the parent's hash"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "What the sub-agent cannot do",
+      "items": [
+        "Call payment.execute: not in its chain (NX-4032), and ABC's trust list denies it",
+        "Mint itself new authority: its grant allows no further delegation (NX-1015)"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "No middleman",
+      "items": [
+        "ABC trusts only XYZ's public key, under ABC's own policy",
+        "No shared secret; revoking xyz.com stops every XYZ grant at once"
+      ]
+    }
+  ]
+}

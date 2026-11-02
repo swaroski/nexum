@@ -4,3 +4,10 @@ target/
 *.db-*
 audit.jsonl
 __pycache__/
+
+# Archify review artifacts and receipts (contain local paths)
+docs/diagrams/.review/
+docs/diagrams/*.finalize.json
+docs/diagrams/*.finalize-summary.json
+docs/diagrams/*.delivery.json
+docs/diagrams/*.browser-check.json

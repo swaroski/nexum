@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Cross-company request, approval and revocation",
+    "subtitle": "XYZ's procurement agent calling Supplier ABC (decision-API mode, as in the demo)",
+    "output": "docs/diagrams/cross-company.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/swaroski/nexum.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "caa906a825639bdce3a6be8849cef8901279935b"
+    },
+    "legend": {
+      "entries": {
+        "emphasis": {
+          "label": "Authorized request"
+        },
+        "security": {
+          "label": "Trust / approval state change"
+        },
+        "dashed": {
+          "label": "Local state lookup"
+        },
+        "return": {
+          "label": "Decision returned"
+        },
+        "default": {
+          "label": "Agent calls the API directly"
+        }
+      }
+    }
+  },
+  "participants": [
+    {
+      "id": "agent",
+      "type": "backend",
+      "label": "XYZ procurement agent",
+      "sublabel": "holds grant + key",
+      "sources": [
+        {
+          "path": "crates/nexum-cli/src/main.rs",
+          "line": 1053,
+          "end_line": 1125,
+          "label": "nexum call signs proof"
+        }
+      ]
+    },
+    {
+      "id": "gateway",
+      "type": "security",
+      "label": "ABC Nexum gateway",
+      "sublabel": "audience abc.com",
+      "sources": [
+        {
+          "path": "crates/nexum-gateway/src/authorizer.rs",
+          "line": 181,
+          "end_line": 313,
+          "label": "decide"
+        },
+        {
+          "path": "crates/nexum-grant/src/verify.rs",
+          "line": 176,
+          "end_line": 292,
+          "label": "chain + proof"
+        }
+      ]
+    },
+    {
+      "id": "api",
+      "type": "cloud",
+      "label": "ABC supplier API",
+      "sublabel": "inventory \u00b7 quotes",
+      "sources": [
+        {
+          "path": "examples/cross-company/abc-policy.yaml",
+          "line": 1,
+          "end_line": 33,
+          "label": "ABC policy"
+        }
+      ]
+    },
+    {
+      "id": "state",
+      "type": "database",
+      "label": "ABC local state",
+      "sublabel": "approvals \u00b7 revocations",
+      "sources": [
+        {
+          "path": "crates/nexum-gateway/src/store.rs",
+          "line": 149,
+          "end_line": 155,
+          "label": "create_approval"
+        },
+        {
+          "path": "crates/nexum-gateway/src/store.rs",
+          "line": 206,
+          "end_line": 213,
+          "label": "consume_approval"
+        },
+        {
+          "path": "crates/nexum-gateway/src/store.rs",
+          "line": 216,
+          "end_line": 228,
+          "label": "is_revoked"
+        }
+      ]
+    },
+    {
+      "id": "operator",
+      "type": "external",
+      "icon": "person",
+      "label": "ABC approver",
+      "sublabel": "nexum CLI",
+      "sources": [
+        {
+          "path": "crates/nexum-cli/src/main.rs",
+          "line": 984,
+          "end_line": 987,
+          "label": "approvals approve"
+        },
+        {
+          "path": "crates/nexum-cli/src/main.rs",
+          "line": 844,
+          "end_line": 851,
+          "label": "trust revoke"
+        }
+      ]
+    }
+  ],
+  "segments": [
+    {
+      "from": 131,
+      "to": 277,
+      "label": "1 \u00b7 ALLOW"
+    },
+    {
+      "from": 289,
+      "to": 571,
+      "label": "2 \u00b7 REQUIRE_APPROVAL \u2192 ALLOW"
+    },
+    {
+      "from": 583,
+      "to": 763,
+      "label": "3 \u00b7 Trust revoked"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m-read",
+      "from": "agent",
+      "to": "gateway",
+      "y": 165,
+      "label": "inventory.read + chain + proof",
+      "variant": "emphasis",
+      "note": "XYZ signature, attenuation, fresh proof, ABC trust, ABC policy"
+    },
+    {
+      "id": "m-read-ok",
+      "from": "gateway",
+      "to": "agent",
+      "y": 231,
+      "label": "200 ALLOW NX-4001",
+      "variant": "return"
+    },
+    {
+      "id": "m-read-call",
+      "from": "agent",
+      "to": "api",
+      "y": 265,
+      "label": "GET sku/123",
+      "variant": "default"
+    },
+    {
+      "id": "m-quote",
+      "from": "agent",
+      "to": "gateway",
+      "y": 323,
+      "label": "quote.create, value 250000",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-pending",
+      "from": "gateway",
+      "to": "state",
+      "y": 357,
+      "label": "store pending approval",
+      "variant": "dashed",
+      "note": "bound to agent, actor, action, resource, value"
+    },
+    {
+      "id": "m-hold",
+      "from": "gateway",
+      "to": "agent",
+      "y": 423,
+      "label": "202 REQUIRE_APPROVAL + id",
+      "variant": "return"
+    },
+    {
+      "id": "m-approve",
+      "from": "operator",
+      "to": "state",
+      "y": 457,
+      "label": "approvals approve id",
+      "variant": "security"
+    },
+    {
+      "id": "m-retry",
+      "from": "agent",
+      "to": "gateway",
+      "y": 491,
+      "label": "retry + Nexum-Approval + new proof",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-consume",
+      "from": "gateway",
+      "to": "state",
+      "y": 525,
+      "label": "consume (single use)",
+      "variant": "dashed"
+    },
+    {
+      "id": "m-quote-ok",
+      "from": "gateway",
+      "to": "agent",
+      "y": 559,
+      "label": "200 ALLOW NX-4003",
+      "variant": "return"
+    },
+    {
+      "id": "m-revoke",
+      "from": "operator",
+      "to": "state",
+      "y": 617,
+      "label": "trust revoke xyz.com",
+      "variant": "security"
+    },
+    {
+      "id": "m-again",
+      "from": "agent",
+      "to": "gateway",
+      "y": 651,
+      "label": "inventory.read + chain + proof",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-check",
+      "from": "gateway",
+      "to": "state",
+      "y": 685,
+      "label": "xyz.com revoked?",
+      "variant": "dashed"
+    },
+    {
+      "id": "m-denied",
+      "from": "gateway",
+      "to": "agent",
+      "y": 719,
+      "label": "403 DENY NX-3003",
+      "variant": "return",
+      "note": "every XYZ grant fails from now on"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Verified locally",
+      "items": [
+        "ABC's gateway checks XYZ's authority with XYZ's public key; no call to XYZ or any SaaS",
+        "Every decision is appended to ABC's hash-chained audit log"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Approvals",
+      "items": [
+        "Bound to one exact request and consumed once",
+        "The retry needs a fresh proof; policy is evaluated again"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Revocation",
+      "items": [
+        "Checked on every request against local state",
+        "Also possible per agent, per grant, or per key"
+      ]
+    }
+  ]
+}
