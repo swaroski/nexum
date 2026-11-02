@@ -161,7 +161,7 @@ nexum init | doctor | call
 nexum gateway start
 nexum agents   register | list | inspect [--a2a-card] | revoke
 nexum grants   issue | delegate | inspect [--verify] | revoke
-nexum trust    list | add | revoke
+nexum trust    list | add | revoke | revoke-key
 nexum policies validate | test
 nexum approvals list | approve | reject
 nexum audit    tail | search | verify

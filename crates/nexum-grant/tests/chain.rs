@@ -446,3 +446,36 @@ fn proof_of_possession() {
         ReasonCode::ProofStale
     );
 }
+
+#[test]
+fn extreme_timestamps_do_not_overflow() {
+    let w = world();
+    let (root, child) = chain(&w);
+    let v = verifier(&w);
+    let verified = v.verify_chain(&[&root, &child]).unwrap();
+    let replay = MemoryReplayGuard::default();
+    for iat in [i64::MIN, i64::MAX] {
+        let p = create_proof(&w.child, &child, AUD, b"{}", iat).unwrap();
+        assert_eq!(
+            v.verify_proof(&verified, &p, b"{}", &replay, 60)
+                .unwrap_err(),
+            ReasonCode::ProofStale
+        );
+    }
+    // Grants with extreme times are rejected, not wrapped.
+    for (iat, exp) in [
+        (i64::MIN, NOW + 10),
+        (NOW - 10, i64::MAX),
+        (i64::MIN, i64::MAX),
+    ] {
+        let mut c = root_claims(&w);
+        c.iat = iat;
+        c.nbf = iat;
+        c.exp = exp;
+        assert!(
+            verifier(&w)
+                .verify_chain(&[&sign_grant(&c, &w.org).unwrap()])
+                .is_err()
+        );
+    }
+}

@@ -444,6 +444,27 @@ async fn mcp_tool_calls_are_enforced_and_forwarded() {
     .await;
     assert_eq!((s, code(&v)), (StatusCode::FORBIDDEN, "NX-5001"));
 
+    // Parser differential: duplicate "name" keys must not reach the upstream.
+    let raw = br#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"wipe_ledger","name":"refund","arguments":{"amount":1}}}"#;
+    let proof = create_proof(
+        &f.procurement,
+        &f.root,
+        "abc.com",
+        raw,
+        chrono::Utc::now().timestamp(),
+    )
+    .unwrap();
+    let req = Request::post("/mcp/payments")
+        .header("nexum-grant", f.root.as_str())
+        .header("nexum-proof", proof)
+        .body(Body::from(&raw[..]))
+        .unwrap();
+    let resp = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let v: Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(code(&v), "NX-5001");
+
     // tools/list is allowed by policy; an unmapped tool is not.
     let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
     let (s, _, _) = send(

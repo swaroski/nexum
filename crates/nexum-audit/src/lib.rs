@@ -91,6 +91,20 @@ impl AuditEvent {
     }
 }
 
+/// Parse a stored event and require it to be byte-identical to its canonical
+/// encoding. Otherwise fields added to the stored JSON would be dropped by
+/// the parser and the hash chain would still verify.
+fn parse_canonical(stored: &str) -> Result<AuditEvent, AuditError> {
+    let e: AuditEvent = serde_json::from_str(stored)?;
+    if serde_json::to_string(&e)? != stored {
+        return Err(AuditError::Tampered {
+            seq: e.seq,
+            msg: "stored event is not in canonical form (fields added or reformatted)".into(),
+        });
+    }
+    Ok(e)
+}
+
 /// Verify a sequence of events in order. Returns the number verified.
 pub fn verify_events<I: IntoIterator<Item = AuditEvent>>(events: I) -> Result<u64, AuditError> {
     let mut prev: Option<AuditEvent> = None;
@@ -159,7 +173,7 @@ fn read_jsonl(path: &Path) -> Result<Vec<AuditEvent>, AuditError> {
     for line in BufReader::new(File::open(path)?).lines() {
         let line = line?;
         if !line.trim().is_empty() {
-            out.push(serde_json::from_str(&line)?);
+            out.push(parse_canonical(&line)?);
         }
     }
     Ok(out)
@@ -244,7 +258,7 @@ impl AuditLog for SqliteAudit {
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let mut out = Vec::new();
         for row in rows {
-            out.push(serde_json::from_str(&row?)?);
+            out.push(parse_canonical(&row?)?);
         }
         Ok(out)
     }
@@ -305,6 +319,14 @@ mod tests {
 
         let text = std::fs::read_to_string(&p).unwrap();
         std::fs::write(&p, text.replacen("\"action\":\"b\"", "\"action\":\"x\"", 1)).unwrap();
+        assert!(matches!(
+            log.verify(),
+            Err(AuditError::Tampered { seq: 2, .. })
+        ));
+
+        let injected = text.replacen("\"seq\":2,", "\"seq\":2,\"note\":\"benign\",", 1);
+        assert_ne!(injected, text);
+        std::fs::write(&p, injected).unwrap();
         assert!(matches!(
             log.verify(),
             Err(AuditError::Tampered { seq: 2, .. })

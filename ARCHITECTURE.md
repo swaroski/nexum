@@ -264,7 +264,9 @@ reordering. If the audit write fails, the decision becomes DENY.
 | A2A v1.0 JSON-RPC (v0.3 aliases) | `POST /a2a/{agent}` | `SendMessage` → `a2a.<agent>.message.send`, etc. |
 
 Adapters only describe a message; they never decide. **Every** message is
-authorized, including listing/discovery. JSON-RPC batches are rejected. MCP
+authorized, including listing/discovery. JSON-RPC batches and bodies with
+duplicate object keys are rejected (the gateway forwards the original bytes,
+so it and the upstream must never read them differently). MCP
 routing headers (`Mcp-Method`, `Mcp-Name`) must agree with the body. Only
 `content-type`, `accept`, `mcp-*` and `a2a-*` headers are forwarded upstream.
 

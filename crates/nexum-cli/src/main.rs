@@ -231,6 +231,13 @@ enum TrustCmd {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Revoke a signing key: an issuer `kid`, or an agent key's JWK
+    /// thumbprint. Every grant signed by or bound to it stops working.
+    RevokeKey {
+        kid: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -402,6 +409,15 @@ fn write_new(path: &Path, contents: &str, secret: bool) -> Result<()> {
     Ok(())
 }
 
+/// Replace a file via write-to-temp + rename, so a crash never leaves a
+/// half-written trust store.
+fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 fn read_key(path: &Path) -> Result<KeyPair> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -533,6 +549,14 @@ fn agents(config: &Path, c: AgentsCmd) -> Result<()> {
     match c {
         AgentsCmd::Register(a) => {
             let id = AgentId::parse(&a.id)?;
+            if a.name.is_empty()
+                || !a
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            {
+                bail!("--name must be [A-Za-z0-9_-]+ (it is used as a file name)");
+            }
             let jwk = match &a.public_key {
                 Some(p) => read_public(p)?,
                 None => {
@@ -609,6 +633,12 @@ fn grants(config: &Path, c: GrantsCmd) -> Result<()> {
                 .signing_key
                 .unwrap_or_else(|| base_dir(config).join(".nexum/org.key.json"));
             let key = read_key(&key_path)?;
+            if a.ttl <= 0 || a.ttl > own.max_grant_ttl_seconds {
+                bail!(
+                    "--ttl must be between 1 and {} seconds (max_grant_ttl_seconds for {domain})",
+                    own.max_grant_ttl_seconds
+                );
+            }
             let sub = AgentId::parse(&a.sub)?;
             if sub.trust_domain() != domain {
                 bail!("{sub} is not in this organization's trust domain {domain}");
@@ -807,7 +837,7 @@ fn trust(config: &Path, c: TrustCmd) -> Result<()> {
                 },
             );
             store.validate().map_err(anyhow::Error::msg)?;
-            std::fs::write(&cfg.trust.file, yaml_serde::to_string(&store)?)?;
+            write_atomic(&cfg.trust.file, &yaml_serde::to_string(&store)?)?;
             println!("now trusting {domain}; restart the gateway to load it");
             Ok(())
         }
@@ -817,6 +847,12 @@ fn trust(config: &Path, c: TrustCmd) -> Result<()> {
                 reason.as_deref(),
             )?;
             println!("revoked trust in {domain} (effective immediately)");
+            Ok(())
+        }
+        TrustCmd::RevokeKey { kid, reason } => {
+            State::open(&cfg.state.file)?
+                .revoke(&RevocationTarget::Key(kid.clone()), reason.as_deref())?;
+            println!("revoked key {kid} (effective immediately)");
             Ok(())
         }
     }

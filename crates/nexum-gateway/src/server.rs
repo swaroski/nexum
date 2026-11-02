@@ -144,7 +144,7 @@ async fn proxy<A: ProtocolAdapter>(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let message: Option<Value> = serde_json::from_slice(&body).ok();
+    let message = crate::adapters::parse_unambiguous(&body);
     let normalized = match &message {
         Some(m) => adapter.normalize(&target, &headers, m),
         None => Err(ReasonCode::InvalidRequest),

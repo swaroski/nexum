@@ -27,6 +27,65 @@ pub trait ProtocolAdapter: Send + Sync {
     ) -> Result<Normalized, ReasonCode>;
 }
 
+/// Parse a JSON body, rejecting duplicate object keys at any depth.
+///
+/// We authorize on our parse but forward the original bytes; if the upstream
+/// resolved a duplicate key differently (first-wins vs our last-wins), it
+/// could execute a different tool or method than the one we authorized.
+pub fn parse_unambiguous(body: &[u8]) -> Option<Value> {
+    serde_json::from_slice::<NoDuplicates>(body).ok()?;
+    serde_json::from_slice(body).ok()
+}
+
+struct NoDuplicates;
+
+impl<'de> serde::Deserialize<'de> for NoDuplicates {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(NoDuplicatesVisitor)
+    }
+}
+
+struct NoDuplicatesVisitor;
+
+impl<'de> serde::de::Visitor<'de> for NoDuplicatesVisitor {
+    type Value = NoDuplicates;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("JSON without duplicate keys")
+    }
+    fn visit_bool<E>(self, _: bool) -> Result<NoDuplicates, E> {
+        Ok(NoDuplicates)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<NoDuplicates, E> {
+        Ok(NoDuplicates)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<NoDuplicates, E> {
+        Ok(NoDuplicates)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<NoDuplicates, E> {
+        Ok(NoDuplicates)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<NoDuplicates, E> {
+        Ok(NoDuplicates)
+    }
+    fn visit_unit<E>(self) -> Result<NoDuplicates, E> {
+        Ok(NoDuplicates)
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<NoDuplicates, A::Error> {
+        while seq.next_element::<NoDuplicates>()?.is_some() {}
+        Ok(NoDuplicates)
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<NoDuplicates, A::Error> {
+        let mut seen = std::collections::HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !seen.insert(key) {
+                return Err(serde::de::Error::custom("duplicate key"));
+            }
+            map.next_value::<NoDuplicates>()?;
+        }
+        Ok(NoDuplicates)
+    }
+}
+
 fn cap(s: &str) -> Result<Capability, ReasonCode> {
     Capability::parse(s).map_err(|_| ReasonCode::InvalidRequest)
 }
@@ -286,6 +345,24 @@ mod tests {
             a.normalize("payments", &h, &call("refund", json!({"amount": 1})))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn rejects_duplicate_keys_at_any_depth() {
+        assert!(parse_unambiguous(br#"{"a":{"b":[1,{"c":2}]},"d":null}"#).is_some());
+        for bad in [
+            &br#"{"method":"tools/list","method":"tools/call"}"#[..],
+            br#"{"params":{"name":"lookup","name":"wipe"}}"#,
+            br#"{"params":{"na\u006de":"lookup","name":"wipe"}}"#,
+            br#"[{"x":1,"x":2}]"#,
+            br#"{"a":1} trailing"#,
+        ] {
+            assert!(
+                parse_unambiguous(bad).is_none(),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
     }
 
     #[test]

@@ -211,13 +211,6 @@ impl State {
         )?;
         Ok(n == 1)
     }
-
-    pub fn find_approval(&self, id: &str) -> anyhow::Result<Option<ApprovalRequest>> {
-        Ok(self
-            .approvals()?
-            .into_iter()
-            .find(|a| a.id.to_string() == id))
-    }
 }
 
 impl RevocationList for State {

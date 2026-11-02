@@ -66,7 +66,9 @@ exercise a mitigation are referenced as `file::test`.
 * **Mitigation:** Nexum credentials and `Authorization` headers are never
   forwarded upstream; only `content-type`, `accept`, `mcp-*`, `a2a-*` are.
   Tool calls are authorized per tool by name → capability; unmapped tools get
-  a derived capability that default-deny blocks. (`cross_company.rs::mcp_tool_calls_are_enforced_and_forwarded`)
+  a derived capability that default-deny blocks. Bodies with duplicate JSON
+  keys are rejected, so the gateway and the server cannot disagree about
+  which tool or method a message names (parser differential). (`cross_company.rs::mcp_tool_calls_are_enforced_and_forwarded`)
 * **Residual:** Nexum does not inspect or sanitize response content; a
   malicious server can still return prompt-injection payloads to the agent
   (see 18).
@@ -155,7 +157,9 @@ exercise a mitigation are referenced as `file::test`.
   other's grants by design (they are one logical recipient).
 
 ### 15. Expired credentials
-* **Mitigation:** `exp`/`nbf`/`iat` checked with bounded skew on every hop.
+* **Mitigation:** `exp`/`nbf`/`iat` checked with bounded skew on every hop,
+  using saturating arithmetic so crafted extreme timestamps cannot wrap
+  around a check. (`chain.rs::extreme_timestamps_do_not_overflow`)
 * **Residual:** a gateway clock that drifts beyond the skew either rejects
   valid grants or accepts recently expired ones. Run NTP; tune
   `clock_skew_seconds` per site.
@@ -170,8 +174,8 @@ exercise a mitigation are referenced as `file::test`.
 
 ### 17. Compromised signing keys
 * **Impact:** forged root grants (issuer key) or delegations (holder key).
-* **Mitigation:** revoke the `kid`/thumbprint; remove the key from the trust
-  store; rotate. Short grant lifetimes. KMS/HSM custody recommended.
+* **Mitigation:** revoke the `kid`/thumbprint (`nexum trust revoke-key`);
+  remove the key from the trust store; rotate. Short grant lifetimes. KMS/HSM custody recommended.
 * **Residual:** until revoked, everything within the domain's allow list is
   forgeable. The receiving org's allow list and policy still bound it.
 
@@ -204,7 +208,8 @@ exercise a mitigation are referenced as `file::test`.
 ### 21. Audit tampering
 * **Impact:** loss of accountability.
 * **Mitigation:** hash chain detects modification, deletion and reordering
-  (`nexum audit verify`); audit write failure denies the request.
+  (`nexum audit verify`); stored events must be byte-identical to their
+  canonical encoding, so injected fields are detected too; audit write failure denies the request.
 * **Residual:** an attacker with write access can rewrite the entire chain
   from some point on. Ship events to an external append-only store
   (WORM/SIEM) and anchor periodic chain heads elsewhere.

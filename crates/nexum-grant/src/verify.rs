@@ -152,10 +152,10 @@ impl Verifier<'_> {
 
     fn check_time_and_audience(&self, c: &GrantClaims) -> Result<(), ReasonCode> {
         let Clock { now, leeway } = self.clock;
-        if now >= c.exp + leeway {
+        if now >= c.exp.saturating_add(leeway) {
             return Err(ReasonCode::GrantExpired);
         }
-        if c.nbf > now + leeway || c.iat > now + leeway {
+        if c.nbf > now.saturating_add(leeway) || c.iat > now.saturating_add(leeway) {
             return Err(ReasonCode::GrantNotYetValid);
         }
         if !c.aud.iter().any(|a| a == self.audience) {
@@ -215,7 +215,7 @@ impl Verifier<'_> {
         if root.prt.is_some() {
             return Err(ReasonCode::BrokenChain);
         }
-        if root.exp - root.iat > domain.max_grant_ttl_seconds {
+        if root.exp.saturating_sub(root.iat) > domain.max_grant_ttl_seconds {
             return Err(ReasonCode::GrantLifetimeTooLong);
         }
         check_self(&root)?;
@@ -276,14 +276,16 @@ impl Verifier<'_> {
             return Err(ReasonCode::ProofBindingMismatch);
         }
         let Clock { now, leeway } = self.clock;
-        if (now - claims.iat).abs() > max_age + leeway {
+        // abs_diff: `(now - iat).abs()` overflows on a crafted iat (e.g. i64::MIN).
+        if now.abs_diff(claims.iat) > max_age.saturating_add(leeway).unsigned_abs() {
             return Err(ReasonCode::ProofStale);
         }
         if claims.jti.is_empty() || claims.jti.len() > 128 {
             return Err(ReasonCode::ProofInvalid);
         }
         let id = format!("{}:{}", claims.gh, claims.jti);
-        if !replay.check_and_insert(id, claims.iat + max_age + leeway, now) {
+        let expires = claims.iat.saturating_add(max_age).saturating_add(leeway);
+        if !replay.check_and_insert(id, expires, now) {
             return Err(ReasonCode::ProofReplayed);
         }
         Ok(())

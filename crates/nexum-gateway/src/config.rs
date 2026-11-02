@@ -138,6 +138,9 @@ impl Config {
         if cfg.gateway.clock_skew_seconds < 0 || cfg.gateway.proof_max_age_seconds <= 0 {
             bail!("clock_skew_seconds must be >= 0 and proof_max_age_seconds > 0");
         }
+        if cfg.gateway.approval_ttl_seconds <= 0 || cfg.gateway.max_body_bytes == 0 {
+            bail!("approval_ttl_seconds and max_body_bytes must be > 0");
+        }
         let base = path.parent().unwrap_or(Path::new("."));
         for p in [
             &mut cfg.policy.file,
