@@ -1,0 +1,70 @@
+# MCP and A2A messages go through the same adapters as the live proxies.
+apiVersion: nexum.dev/v1alpha1
+kind: EvalSuite
+category: protocol
+org: partner.example
+scenarios:
+  - name: mcp-mapped-tool-call
+    description: Baseline. lookup_stock maps to inventory.read.
+    invariant: A mapped MCP tool call is authorized as its capability.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read], res: ["mcp://erp/*"] }
+    request:
+      mcp: { target: erp, message: { jsonrpc: "2.0", id: 1, method: tools/call, params: { name: lookup_stock, arguments: { sku: "1" } } } }
+    expect: ALLOW
+
+  - name: mcp-tool-escalation
+    description: An agent allowed to look up stock calls the create_quote tool.
+    invariant: Each MCP tool requires its own capability.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read], res: ["mcp://erp/*"] }
+    request:
+      mcp: { target: erp, message: { jsonrpc: "2.0", id: 1, method: tools/call, params: { name: create_quote, arguments: { amount: 10 } } } }
+    expect: DENY
+    code: NX-4032
+
+  - name: mcp-unmapped-tool
+    description: A tool nobody wrote policy for, even with a wildcard grant.
+    invariant: Unknown tools are default-deny.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: ["mcp.erp.*"], res: ["mcp://erp*"] }
+    request:
+      mcp: { target: erp, message: { jsonrpc: "2.0", id: 1, method: tools/call, params: { name: wipe_ledger } } }
+    expect: DENY
+    code: NX-4036
+
+  - name: mcp-duplicate-key-parser-differential
+    description: Two "name" keys; the gateway and the server might disagree on which tool runs.
+    invariant: Ambiguous messages are rejected before authorization.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read, "mcp.erp.*"], res: ["mcp://erp*"] }
+    request:
+      mcp: { target: erp, raw: '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"wipe_ledger","name":"lookup_stock"}}' }
+    expect: DENY
+    code: NX-5001
+
+  - name: a2a-send-message
+    description: Baseline. A partner agent messages ACME's sales agent.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [a2a.sales.message.send], res: ["a2a://sales"] }
+    request:
+      a2a: { target: sales, message: { jsonrpc: "2.0", id: 1, method: SendMessage, params: { message: { role: user, parts: [] } } } }
+    expect: ALLOW
+
+  - name: a2a-method-escalation
+    description: Allowed to send messages, the agent tries to cancel someone's task.
+    invariant: Each A2A operation requires its own capability.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [a2a.sales.message.send], res: ["a2a://sales"] }
+    request:
+      a2a: { target: sales, message: { jsonrpc: "2.0", id: 1, method: CancelTask, params: { id: task-1 } } }
+    expect: DENY
+    code: NX-4032
+
+  - name: a2a-unknown-method
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: ["a2a.sales.*"], res: ["a2a://sales"] }
+    request:
+      a2a: { target: sales, message: { jsonrpc: "2.0", id: 1, method: DeleteEverything } }
+    expect: DENY
+    code: NX-5001

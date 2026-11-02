@@ -9,7 +9,12 @@
 pub mod adapters;
 pub mod authorizer;
 pub mod config;
+pub mod discover;
+pub mod eval;
+pub mod opa;
+pub mod risk;
 pub mod server;
+pub mod simulate;
 pub mod store;
 
 use std::path::Path;
@@ -51,9 +56,15 @@ pub fn build(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
         settings: cfg.gateway.clone(),
         trust: load_trust(&cfg.trust.file)?,
         state: Arc::new(State::open(&cfg.state.file)?),
-        pdp: Arc::new(BuiltinPdp {
-            set: load_policy(&cfg.policy.file)?,
-        }),
+        pdp: match cfg.policy.url.clone() {
+            Some(url) => Arc::new(opa::OpaPdp::new(
+                url,
+                std::time::Duration::from_millis(cfg.policy.timeout_ms.unwrap_or(500)),
+            )?),
+            None => Arc::new(BuiltinPdp {
+                set: load_policy(cfg.policy.builtin_file()?)?,
+            }),
+        },
         audit: Arc::from(
             nexum_audit::open(&cfg.audit.provider, &cfg.audit.path)
                 .with_context(|| format!("opening audit log {}", cfg.audit.path.display()))?,
@@ -92,9 +103,31 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     }
     tracing::info!(%addr, audience = %cfg.gateway.audience, "nexum gateway listening");
     axum::serve(listener, server::router(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// Ctrl-C, or SIGTERM from `docker stop` / Kubernetes. As a container's
+/// PID 1 the gateway would otherwise ignore SIGTERM and be killed mid-request.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot listen for SIGTERM");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("shutting down");
 }

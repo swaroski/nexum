@@ -1,0 +1,4 @@
+# getrandom 0.3+/0.4 on wasm32-unknown-unknown: randomness is provided by
+# nexum-playground (browser crypto.getRandomValues). Only affects wasm builds.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="custom"']

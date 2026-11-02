@@ -1,0 +1,20 @@
+---
+title: Playground
+description: Try Nexum's decision pipeline in your browser. Real signatures, real delegation checks, real policy engine, throwaway keys.
+tableOfContents: false
+---
+
+import Playground from "../../components/Playground.astro";
+
+Configure who delegates what to whom, what the receiving organization trusts,
+and its policy, then **Evaluate**. The page mints a real Ed25519-signed grant
+chain and proof with throwaway keys and runs Nexum's verifier and policy engine,
+compiled to WebAssembly, in your browser. Nothing is sent anywhere.
+
+<Playground />
+
+The decision pipeline here (`nexum-sim`) uses the same verifier, attenuation
+and trust checks and built-in policy engine as the gateway, and a test holds it
+to the gateway's results on every decision-API scenario of the
+[official eval suite](/nexum/guides/evals/). Differences: approvals stop at
+REQUIRE_APPROVAL, and nothing is audited.

@@ -55,6 +55,57 @@ pub struct AuditRecord {
     pub protocol: Option<String>,
     pub grant_ids: Vec<String>,
     pub approval_id: Option<Uuid>,
+    // Added after v0.1's first events. Omitted when empty so earlier events
+    // keep their canonical form and their hashes still verify.
+    /// W3C trace id the caller propagated. Caller-asserted: it correlates
+    /// gateways for investigation and never affects a decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    /// The logical delegation path, root holder first (SPIFFE IDs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<String>,
+    /// Request value, so decisions can be re-evaluated against a new policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    /// Administrative events: who ran the command (self-reported OS user or
+    /// `--by`; not authenticated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    /// Administrative events: human-readable parameters or reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl AuditRecord {
+    /// An empty record of `event_type`, timestamped now.
+    pub fn new(event_type: &str) -> Self {
+        Self {
+            event_type: event_type.into(),
+            timestamp: Utc::now(),
+            request_id: Uuid::now_v7(),
+            decision_id: None,
+            agent: None,
+            organization: None,
+            actor: None,
+            action: None,
+            resource: None,
+            decision: None,
+            reason_codes: vec![],
+            delegation_depth: None,
+            policy: None,
+            protocol: None,
+            grant_ids: vec![],
+            approval_id: None,
+            trace_id: None,
+            chain: vec![],
+            value: None,
+            purpose: None,
+            operator: None,
+            detail: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -298,7 +349,27 @@ mod tests {
             protocol: Some("http".into()),
             grant_ids: vec![],
             approval_id: None,
+            trace_id: None,
+            chain: vec![],
+            value: None,
+            purpose: None,
+            operator: None,
+            detail: None,
         }
+    }
+
+    #[test]
+    fn unset_trace_fields_keep_the_original_event_format() {
+        let e = AuditEvent::chain(rec("a"), None).unwrap();
+        let json = serde_json::to_string(&e).unwrap();
+        for k in [
+            "trace_id", "chain", "value", "purpose", "operator", "detail",
+        ] {
+            assert!(!json.contains(&format!("\"{k}\"")), "{json}");
+        }
+        assert_eq!(parse_canonical(&json).unwrap(), e);
+        let null = json.replacen("\"seq\":1,", "\"seq\":1,\"trace_id\":null,", 1);
+        assert!(parse_canonical(&null).is_err());
     }
 
     fn tmp(name: &str) -> PathBuf {

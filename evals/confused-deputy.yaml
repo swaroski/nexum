@@ -1,0 +1,26 @@
+# A deputy holds broad authority; whoever it acts for must not be able to
+# borrow more than what was delegated to them.
+apiVersion: nexum.dev/v1alpha1
+kind: EvalSuite
+category: confused-deputy
+org: partner.example
+scenarios:
+  - name: worker-borrows-parents-resources
+    description: The worker was delegated inventory only, then asks for pricing data the deputy can read.
+    invariant: Each request is judged on the presenting agent's own delegated authority.
+    grants:
+      - { sub: spiffe://partner.example/agents/deputy, cap: [inventory.read, pricing.read], res: ["erp://acme/*"], dcap: [inventory.read, pricing.read], max_depth: 1 }
+      - { sub: spiffe://partner.example/agents/worker, cap: [inventory.read], res: ["erp://acme/inventory/*"] }
+    request: { action: pricing.read, resource: "erp://acme/pricing/secret" }
+    expect: DENY
+    code: NX-4032
+
+  - name: worker-borrows-parents-resource-scope
+    description: Same capability, but on a resource only the deputy was given.
+    invariant: Resource scope narrows with delegation and is enforced per request.
+    grants:
+      - { sub: spiffe://partner.example/agents/deputy, cap: [pricing.read], res: ["erp://acme/*"], dcap: [pricing.read], max_depth: 1 }
+      - { sub: spiffe://partner.example/agents/worker, cap: [pricing.read], res: ["erp://acme/pricing/public/*"] }
+    request: { action: pricing.read, resource: "erp://acme/pricing/secret" }
+    expect: DENY
+    code: NX-4033

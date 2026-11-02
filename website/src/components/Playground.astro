@@ -1,0 +1,191 @@
+---
+// Browser playground; see src/content/docs/playground.mdx.
+const policy = `apiVersion: nexum.dev/v1alpha1
+kind: Policy
+id: abc-supplier-v1
+subjects: [{ organization: xyz.com }]
+rules:
+  - { id: reads, action: inventory.read, resource: "supplier://abc/*", effect: allow }
+  - { id: pricing, action: pricing.read, resource: "supplier://abc/*", effect: allow }
+  - { id: quote-auto, action: quote.create, effect: allow, conditions: { max_value: 100000 } }
+  - { id: quote-approval, action: quote.create, effect: approval, conditions: { value_above: 100000 } }
+  - { id: no-payments, action: payment.execute, effect: deny }
+delegation: { allowed: [inventory.read, pricing.read], max_depth: 2 }`;
+---
+
+<div class="pg" id="pg">
+  <fieldset class="pg-presets">
+    <legend>Start from a scenario</legend>
+    <div class="pg-preset-buttons" id="pg-presets"></div>
+  </fieldset>
+
+  <div class="pg-grid">
+    <fieldset>
+      <legend>Parent agent (root grant from <span id="pg-org-label">xyz.com</span>)</legend>
+      <label>Agent <input id="p-sub" value="spiffe://xyz.com/agents/procurement" /></label>
+      <label>Capabilities <input id="p-cap" value="inventory.read, pricing.read" /></label>
+      <label>Resources <input id="p-res" value="supplier://abc/*" /></label>
+      <label>May delegate <input id="p-dcap" value="inventory.read" /></label>
+      <label>Max delegation depth <input id="p-depth" type="number" min="0" value="1" /></label>
+      <label>Acting for <input id="p-actor" value="jane@xyz.com" /></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>
+        <label class="pg-inline"><input type="checkbox" id="c-on" checked /> Delegated sub-agent</label>
+      </legend>
+      <label>Agent <input id="c-sub" value="spiffe://xyz.com/agents/worker" /></label>
+      <label>Capabilities <input id="c-cap" value="inventory.read" /></label>
+      <label>Resources (blank = inherit) <input id="c-res" value="" /></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Request (made by the last agent)</legend>
+      <label>Action <input id="r-action" value="payment.execute" /></label>
+      <label>Resource <input id="r-resource" value="supplier://abc/invoice/77" /></label>
+      <label>Value <input id="r-value" type="number" min="0" value="9000" /></label>
+      <label>Attack
+        <select id="attack">
+          <option value="">none</option>
+          <option>replay</option><option>stolen-grant</option><option>expired</option>
+          <option>stale-proof</option><option>wrong-audience</option><option>untrusted-issuer</option>
+          <option>unknown-organization</option><option>tampered</option><option>revoked-parent</option>
+          <option>revoked-agent</option><option>revoked-trust</option><option>body-swap</option>
+        </select>
+      </label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Receiving organization abc.com: trust in xyz.com</legend>
+      <label>Allow <input id="t-allow" value="inventory.read, pricing.read, quote.create, payment.execute" /></label>
+      <label>Deny <input id="t-deny" value="customer.export" /></label>
+      <label class="pg-inline"><input type="checkbox" id="t-untrusted" /> xyz.com is not in the trust store</label>
+    </fieldset>
+  </div>
+
+  <label class="pg-policy">abc.com policy (built-in engine)
+    <textarea id="policy" rows="11" spellcheck="false" set:text={policy}></textarea>
+  </label>
+
+  <button class="pg-run" id="pg-run" type="button">Evaluate</button>
+  <div id="pg-out" class="pg-out" aria-live="polite"></div>
+</div>
+
+<script>
+const WASM = "/nexum/playground/nexum.wasm";
+const $ = (id) => document.getElementById(id);
+const list = (s) => s.split(",").map((x) => x.trim()).filter(Boolean);
+let wasm;
+
+async function load() {
+  if (wasm) return wasm;
+  let mem;
+  const { instance } = await WebAssembly.instantiateStreaming(fetch(WASM), {
+    env: { fill_random: (p, n) => crypto.getRandomValues(new Uint8Array(mem.buffer, p, n)) },
+  });
+  mem = instance.exports.memory;
+  wasm = (obj) => {
+    const x = instance.exports;
+    const input = new TextEncoder().encode(JSON.stringify(obj));
+    const p = x.alloc(input.length);
+    new Uint8Array(mem.buffer, p, input.length).set(input);
+    const r = x.evaluate(p, input.length);
+    x.dealloc(p, input.length);
+    const op = Number(r >> 32n), ol = Number(r & 0xffffffffn);
+    const out = new TextDecoder().decode(new Uint8Array(mem.buffer, op, ol));
+    x.dealloc(op, ol);
+    return JSON.parse(out);
+  };
+  return wasm;
+}
+
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+  for (const k of kids.flat()) e.append(k instanceof Node ? k : document.createTextNode(k ?? ""));
+  return e;
+}
+
+function scenario() {
+  const parent = {
+    sub: $("p-sub").value.trim(), cap: list($("p-cap").value), res: list($("p-res").value),
+    dcap: list($("p-dcap").value), max_depth: Number($("p-depth").value) || 0,
+  };
+  if ($("p-actor").value.trim()) parent.actor = $("p-actor").value.trim();
+  const grants = [parent];
+  if ($("c-on").checked) {
+    const child = { sub: $("c-sub").value.trim(), cap: list($("c-cap").value) };
+    if (list($("c-res").value).length) child.res = list($("c-res").value);
+    grants.push(child);
+  }
+  const request = { action: $("r-action").value.trim(), resource: $("r-resource").value.trim() };
+  if ($("r-value").value !== "") request.value = Number($("r-value").value);
+  return { name: "playground", expect: "ALLOW", grants, request, attack: $("attack").value || null };
+}
+
+async function run() {
+  const out = $("pg-out");
+  out.replaceChildren(el("p", {}, "Evaluating…"));
+  try {
+    const evaluate = await load();
+    const r = evaluate({
+      audience: "abc.com", org: "xyz.com", now: Math.floor(Date.now() / 1000), policy: $("policy").value,
+      trust: { allow: list($("t-allow").value), deny: list($("t-deny").value), untrusted: $("t-untrusted").checked },
+      scenario: scenario(),
+    });
+    if (r.error) { out.replaceChildren(el("p", { class: "pg-err", role: "alert" }, r.error)); return; }
+    const d = r.decision;
+    const code = el("a", { href: "/nexum/errors/" + d.code.toLowerCase() + "/" }, d.code);
+    out.replaceChildren(
+      el("p", { class: "pg-outcome pg-" + d.outcome }, d.outcome, " ", code),
+      el("p", {}, d.reason),
+      el("table", {}, el("tbody", {}, d.checks.map((c) =>
+        el("tr", {}, el("th", { scope: "row" }, c.label), el("td", { class: "pg-" + c.status.split(" ")[0] }, c.status))))),
+      el("p", { class: "pg-meta" },
+        d.security_event ? ["Security event: ", el("code", {}, d.security_event), ". "] : "",
+        d.policy ? ["Policy: ", el("code", {}, d.policy + (d.rule ? " / " + d.rule : "")), ". "] : "",
+        d.chain.length ? ["Verified chain: ", d.chain.join(" → "), "."] : "Chain not verified.",
+        " ", r.grants.length + " signed grant(s), " + r.token_bytes + " bytes."),
+    );
+  } catch (e) {
+    out.replaceChildren(el("p", { class: "pg-err", role: "alert" }, "Playground failed to load: " + e.message));
+  }
+}
+
+const base = {
+  "p-sub": "spiffe://xyz.com/agents/procurement", "p-cap": "inventory.read, pricing.read", "p-res": "supplier://abc/*",
+  "p-dcap": "inventory.read", "p-depth": "1", "p-actor": "jane@xyz.com", "c-on": true,
+  "c-sub": "spiffe://xyz.com/agents/worker", "c-cap": "inventory.read", "c-res": "",
+  "r-action": "inventory.read", "r-resource": "supplier://abc/sku/123", "r-value": "", attack: "",
+  "t-untrusted": false,
+};
+const presets = {
+  "Valid delegated read": {},
+  "Privilege escalation": { "r-action": "payment.execute", "r-resource": "supplier://abc/invoice/77", "r-value": "9000" },
+  "Delegation amplification": { "c-cap": "inventory.read, pricing.read", "r-action": "pricing.read" },
+  "Confused deputy": { "p-cap": "pricing.read", "p-dcap": "pricing.read", "c-cap": "pricing.read",
+    "c-res": "supplier://abc/pricing/public/*", "r-action": "pricing.read", "r-resource": "supplier://abc/pricing/secret" },
+  "Large quote (approval)": { "p-cap": "quote.create", "c-on": false, "r-action": "quote.create", "r-resource": "supplier://abc/quote/new", "r-value": "250000" },
+  "Replay attack": { attack: "replay" },
+  "Stolen grant": { attack: "stolen-grant" },
+  "Wrong audience": { attack: "wrong-audience" },
+  "Expired grant": { attack: "expired" },
+  "Revoked agent": { attack: "revoked-agent" },
+  "Cross-company trust revoked": { attack: "revoked-trust" },
+  "Unknown organization": { "t-untrusted": true },
+};
+function apply(p) {
+  for (const [id, v] of Object.entries({ ...base, ...p })) {
+    const e = $(id);
+    if (e.type === "checkbox") e.checked = v; else e.value = v;
+  }
+  return run();
+}
+for (const name of Object.keys(presets)) {
+  const b = el("button", { type: "button", class: "pg-preset" }, name);
+  b.addEventListener("click", () => apply(presets[name]).then(() => $("pg-out").scrollIntoView({ block: "nearest" })));
+  $("pg-presets").append(b);
+}
+$("pg-run").addEventListener("click", () => run().then(() => $("pg-out").scrollIntoView({ block: "nearest" })));
+apply(presets["Privilege escalation"]);
+</script>

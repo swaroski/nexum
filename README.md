@@ -148,6 +148,10 @@ framework, cloud or model.
 
 ### 🔍 Security review & incident response
 `nexum policies test` answers "would this be allowed?" before you deploy.
+`nexum eval run` replays attack scenarios (escalation, replay, stolen grants,
+tampering, revocation, prompt injection…) through the real pipeline in CI,
+with no real keys. `nexum trace inspect` shows which check decided and how
+authority travelled.
 `nexum audit search` answers "what did this agent do, and for whom?" after an
 incident, from a log you can prove hasn't been altered.
 
@@ -343,7 +347,10 @@ trust_domains:
 * **Holder-of-key grants + per-request proofs** bound to body, grant and gateway; single use.
 * **Fail closed** on every error, including policy, state and audit failures.
 * **No credentials forwarded** upstream; no tokens or payloads in logs or audit.
-* `#![forbid(unsafe_code)]` everywhere; attack-named negative tests and property tests.
+* `unsafe` forbidden in every runtime crate (the only exception is the
+  browser playground's ~40-line wasm shim, never run server-side);
+  attack-named negative tests, property tests, and a 94-scenario security eval
+  suite on every commit.
 
 Read the full [threat model](THREAT_MODEL.md) (24 threats, mitigations and
 residual risks). Report vulnerabilities privately per [SECURITY.md](SECURITY.md).
@@ -354,15 +361,32 @@ residual risks). Report vulnerabilities privately per [SECURITY.md](SECURITY.md)
 ## 🛠️ CLI
 
 ```text
-nexum init | doctor | call
+nexum init | doctor | call | console
+nexum eval      run [paths] [--json] [--baseline results.json]
+nexum trace     inspect <request-or-trace-id> [--audit …] [--json]
+nexum risk      scan [--json]
+nexum discover  a2a <url>…
 nexum gateway   start
 nexum agents    register | list | inspect [--a2a-card] | revoke
 nexum grants    issue | delegate | inspect [--verify] | revoke
 nexum trust     list | add | revoke | revoke-key
-nexum policies  validate | test
+nexum policies  validate | test | simulate <proposed.yaml> [--fail-on-widen]
 nexum approvals list | approve | reject
 nexum audit     tail | search | verify
 ```
+
+Every decision runs in a `nexum.authorize` tracing span with stable
+`nexum.*` attributes and a `nexum.security_event` for alert-worthy denials.
+Set `NEXUM_LOG_FORMAT=json` for log pipelines, or `OTEL_EXPORTER_OTLP_ENDPOINT`
+to export spans to a local OpenTelemetry Collector; a caller's W3C
+`traceparent` links decisions across gateways. The official security suite
+lives in [`evals/`](evals) (`nexum -c evals/gateway/nexum.yaml eval run evals`),
+and this repository is a GitHub Action for running your own suites in CI.
+`nexum console` is a local web UI over one gateway (decisions, traces,
+agents, trust, approvals); OPA can replace the built-in policy engine
+([`examples/opa`](examples/opa)); a [browser playground](https://swaroski.github.io/nexum/playground/)
+runs the decision pipeline in WebAssembly. Where Nexum is going:
+[docs/PLATFORM.md](docs/PLATFORM.md).
 
 ## Principles
 

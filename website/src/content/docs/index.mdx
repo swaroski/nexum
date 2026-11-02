@@ -1,0 +1,120 @@
+---
+title: Nexum
+description: The open, vendor-neutral trust and authorization fabric for AI agents.
+template: splash
+hero:
+  tagline: >-
+    The open, vendor-neutral trust and authorization fabric for AI agents.
+    Secure agent-to-agent, agent-to-tool and cross-organization calls across
+    any cloud, framework, model or protocol.
+  actions:
+    - text: 5-minute quickstart
+      link: /nexum/start/quickstart/
+      icon: right-arrow
+    - text: How it works
+      link: /nexum/concepts/how-it-works/
+      variant: minimal
+    - text: GitHub
+      link: https://github.com/swaroski/nexum
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+> *May this agent, acting through this chain of delegated authority, perform
+> this action on this resource, right now?*
+
+Nexum answers that question with a small Rust gateway that runs next to your
+tools, APIs and agents. Every request carries cryptographic proof of delegated
+authority, and the gateway decides deterministically, inside your own
+environment, with no control plane on the request path.
+
+```text
+  LangGraph · CrewAI · Mastra · OpenAI Agents · custom      any model, any cloud
+                           │
+                           ▼
+  ┌──────────────────── NEXUM gateway ─────────────────────┐
+  │  identity · delegation · trust · policy · approval     │   your environment,
+  │            → ALLOW · DENY · REQUIRE_APPROVAL           │   your keys,
+  │  hash-chained audit · authority traces                 │   no SaaS in the path
+  └──────────────┬──────────────────────────┬──────────────┘
+                 ▼                          ▼
+           MCP tools · APIs          A2A agents, other companies
+```
+
+## A decision in 30 seconds
+
+A procurement agent delegated `inventory.read` to a worker. The worker gets
+prompt-injected and tries to pay an invoice:
+
+```text
+$ nexum call --grant root.jwt --grant worker.jwt --key worker.key.json \
+    --action payment.execute --resource supplier://abc/invoice/77 --value 9000
+DENIED NX-4032
+
+  Agent:      spiffe://xyz.com/agents/inventory-checker
+  On behalf:  jane@xyz.com
+  Requested:  payment.execute  supplier://abc/invoice/77
+  Value:      9000
+  Reason:     The requested capability was not present in the delegation chain.
+  Chain:      depth 1, capabilities: inventory.read
+  Learn more: https://swaroski.github.io/nexum/errors/nx-4032/
+
+$ nexum trace inspect <request-id>
+  Authority:  spiffe://xyz.com/agents/procurement  (root grant from xyz.com)
+                ↓ delegated
+              spiffe://xyz.com/agents/inventory-checker
+
+  Identity & delegation chain   PASS
+  Proof of possession           PASS
+  Request normalization         PASS
+  Delegated authority           FAIL
+  Organization trust            NOT EVALUATED
+  …
+  Security:   privilege_escalation_attempt
+```
+
+Whatever the model was told, the worker can only use what it was given.
+Then prove it stays that way: [`nexum eval run`](/nexum/guides/evals/) replays
+94 attacks against your own policy in CI.
+
+<CardGrid>
+  <Card title="Agent identity" icon="seti:lock">
+    Every agent has its own SPIFFE ID, separate from the human it acts for.
+  </Card>
+  <Card title="Delegation only narrows" icon="random">
+    Each hop can only shrink capabilities, resources, value limits, audience
+    and lifetime. Checked on every hop, every request.
+  </Card>
+  <Card title="No bearer tokens" icon="approve-check">
+    A fresh signature over the exact request body. Stolen grants and replayed
+    requests fail.
+  </Card>
+  <Card title="Cross-company trust" icon="puzzle">
+    Partners verify your agents with your public key under their own policy.
+    No shared secrets, and no vendor in the middle.
+  </Card>
+  <Card title="Security evals" icon="warning">
+    `nexum eval` runs escalation, replay, theft and tampering attacks through
+    the real pipeline in CI.
+  </Card>
+  <Card title="Verifiable audit" icon="document">
+    One hash-chained event per decision, plus OpenTelemetry spans for every
+    decision.
+  </Card>
+</CardGrid>
+
+## Three outcomes, one rule
+
+`ALLOW`, `DENY`, or `REQUIRE_APPROVAL`, each with a stable
+[reason code](/nexum/reference/reason-codes/). Anything unknown, unverifiable
+or unavailable is a `DENY`.
+
+**LLMs propose. Deterministic systems authorize.** No prompt, model output or
+agent message can change what an agent is allowed to do.
+
+:::caution[Status]
+v0.1 alpha, `nexum.dev/v1alpha1`. Not yet independently security-reviewed.
+Don't make it your only control for high-impact actions yet.
+:::

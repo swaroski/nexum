@@ -1,0 +1,25 @@
+[package]
+name = "nexum-sim"
+description = "Nexum authorization scenarios: grant minting, attacks and an in-memory decision pipeline (used by Nexum Eval and the browser playground)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nexum-core.workspace = true
+nexum-grant.workspace = true
+nexum-policy.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+yaml_serde.workspace = true
+
+[lints]
+workspace = true

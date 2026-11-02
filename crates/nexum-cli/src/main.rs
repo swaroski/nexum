@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+mod console;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -57,10 +59,26 @@ enum Cmd {
     Approvals(ApprovalsCmd),
     #[command(subcommand)]
     Audit(AuditCmd),
+    #[command(subcommand)]
+    Trace(TraceCmd),
+    #[command(subcommand)]
+    Risk(RiskCmd),
+    #[command(subcommand)]
+    Discover(DiscoverCmd),
     /// Call a gateway's decision API as an agent (signs a fresh proof).
     Call(CallArgs),
+    #[command(subcommand)]
+    Eval(EvalCmd),
     /// Check configuration, keys, trust, policy, state and audit integrity.
     Doctor,
+    /// Local web console over this gateway's files (loopback only).
+    Console {
+        #[arg(long, default_value = "127.0.0.1:7070")]
+        listen: std::net::SocketAddr,
+        /// Name recorded on approvals and revocations made in the console.
+        #[arg(long = "as", env = "USER")]
+        operator: String,
+    },
 }
 
 #[derive(Args)]
@@ -247,6 +265,20 @@ enum PoliciesCmd {
     },
     /// Evaluate trust + policy for a hypothetical request.
     Test(PolicyTestArgs),
+    /// Re-evaluate recorded decisions under a proposed policy and report
+    /// what would change.
+    Simulate {
+        /// The proposed policy file.
+        proposed: PathBuf,
+        /// Audit logs to replay (repeat). Default: this gateway's.
+        #[arg(long = "audit")]
+        audits: Vec<PathBuf>,
+        #[arg(long)]
+        json: bool,
+        /// Exit non-zero if any decision would become more permissive.
+        #[arg(long)]
+        fail_on_widen: bool,
+    },
 }
 
 #[derive(Args)]
@@ -304,6 +336,66 @@ enum AuditCmd {
     Verify,
 }
 
+#[derive(Subcommand)]
+enum EvalCmd {
+    /// Run security eval suites (and generated attacks) against sandboxed
+    /// copies of this gateway's trust, policy and adapters. Exits non-zero
+    /// if any scenario fails.
+    Run {
+        /// Suite files or directories (searched recursively).
+        #[arg(default_value = "evals")]
+        paths: Vec<PathBuf>,
+        /// Machine-readable results for CI.
+        #[arg(long)]
+        json: bool,
+        /// A previous `--json` result: report scenarios that passed then and
+        /// fail now (e.g. across Nexum versions or policy changes).
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DiscoverCmd {
+    /// Fetch A2A Agent Cards (read-only) and report which agents Nexum
+    /// manages. A base URL is tried at /.well-known/agent-card.json.
+    A2a {
+        #[arg(required = true)]
+        urls: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RiskCmd {
+    /// Explainable findings from trust, policy, registry and recent audit.
+    /// Exits non-zero if any HIGH finding exists.
+    Scan {
+        /// Audit window, in days.
+        #[arg(long, default_value_t = 7)]
+        days: i64,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TraceCmd {
+    /// Explain a decision: who acted for whom, through which delegation
+    /// chain, and which check decided. Accepts a request id, decision id or
+    /// trace id; a trace id gathers every hop across the given audit logs.
+    Inspect {
+        id: String,
+        /// Audit logs to search (repeat for several gateways; `.jsonl` or
+        /// SQLite). Default: this gateway's audit log.
+        #[arg(long = "audit")]
+        audits: Vec<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Args)]
 struct CallArgs {
     /// Grant chain files, root first (repeat).
@@ -340,13 +432,13 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Cmd::Init(a) => init(a),
         Cmd::Gateway(GatewayCmd::Start) => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "info".into()),
-                )
-                .init();
-            nexum_gateway::serve(Config::load(&cli.config)?).await
+            let tracer = init_telemetry()?;
+            let served = nexum_gateway::serve(Config::load(&cli.config)?).await;
+            if let Some(t) = tracer {
+                // Flush buffered spans off the async runtime.
+                let _ = tokio::task::spawn_blocking(move || t.shutdown()).await;
+            }
+            served
         }
         Cmd::Agents(c) => agents(&cli.config, c),
         Cmd::Grants(c) => grants(&cli.config, c),
@@ -354,9 +446,207 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Policies(c) => policies(&cli.config, c),
         Cmd::Approvals(c) => approvals(&cli.config, c),
         Cmd::Audit(c) => audit(&cli.config, c),
+        Cmd::Risk(RiskCmd::Scan { days, json }) => risk_scan(&cli.config, days, json),
+        Cmd::Discover(DiscoverCmd::A2a { urls, json }) => {
+            discover_a2a(&cli.config, &urls, json).await
+        }
+        Cmd::Trace(TraceCmd::Inspect { id, audits, json }) => {
+            trace_inspect(&cli.config, &id, audits, json)
+        }
         Cmd::Call(a) => call(a).await,
+        Cmd::Eval(EvalCmd::Run {
+            paths,
+            json,
+            baseline,
+        }) => eval(&cli.config, &paths, json, baseline.as_deref()).await,
         Cmd::Doctor => doctor(&cli.config),
+        Cmd::Console { listen, operator } => console::serve(cli.config, listen, operator).await,
     }
+}
+
+async fn eval(config: &Path, paths: &[PathBuf], json: bool, baseline: Option<&Path>) -> Result<()> {
+    use nexum_gateway::eval;
+    let cfg = Config::load(config)?;
+    let mut results = Vec::new();
+    for path in eval::discover(paths)? {
+        let suite = eval::load(&path)?;
+        results.extend(eval::run_suite(&cfg, &path.display().to_string(), &suite).await);
+    }
+    let total = results.len();
+    let passed = results.iter().filter(|r| r.passed).count();
+    let critical: Vec<_> = results.iter().filter(|r| r.critical).collect();
+    let score = 100.0 * passed as f64 / total.max(1) as f64;
+    // Scenario names are unique per category; suite paths may differ between runs.
+    let key = |cat: &Value, name: &Value| {
+        format!(
+            "{}/{}",
+            cat.as_str().unwrap_or(""),
+            name.as_str().unwrap_or("")
+        )
+    };
+    let (base_version, regressions) = match baseline {
+        None => (None, vec![]),
+        Some(p) => {
+            let b: Value = serde_json::from_str(
+                &std::fs::read_to_string(p)
+                    .with_context(|| format!("reading baseline {}", p.display()))?,
+            )
+            .with_context(|| format!("parsing baseline {}", p.display()))?;
+            let passed_then: std::collections::BTreeSet<String> = b["results"]
+                .as_array()
+                .context("baseline has no results")?
+                .iter()
+                .filter(|r| r["passed"] == true)
+                .map(|r| key(&r["category"], &r["name"]))
+                .collect();
+            let regressions: Vec<String> = results
+                .iter()
+                .filter(|r| !r.passed)
+                .map(|r| key(&serde_json::json!(r.category), &serde_json::json!(r.name)))
+                .filter(|k| passed_then.contains(k))
+                .collect();
+            (
+                Some(format!(
+                    "{} ({:.1}%)",
+                    b["nexum_version"].as_str().unwrap_or("?"),
+                    b["score"].as_f64().unwrap_or(0.0)
+                )),
+                regressions,
+            )
+        }
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "nexum_version": env!("CARGO_PKG_VERSION"),
+                "total": total,
+                "passed": passed,
+                "failed": total - passed,
+                "critical": critical.len(),
+                "score": score,
+                "regressions": regressions,
+                "results": results,
+            }))?
+        );
+    } else {
+        println!("NEXUM SECURITY EVAL\n\n{total} scenarios\n");
+        for r in &results {
+            if r.passed {
+                println!("  PASS      {}", r.name);
+                continue;
+            }
+            let got = match &r.error {
+                Some(e) => format!("error: {e}"),
+                None => format!("got {} {}", r.actual, r.actual_code.unwrap_or("-")),
+            };
+            println!(
+                "  {:<9} {}: expected {} {}, {got}  ({})",
+                if r.critical { "CRITICAL" } else { "FAIL" },
+                r.name,
+                r.expect,
+                r.expect_code.as_deref().unwrap_or(""),
+                r.suite,
+            );
+        }
+        println!(
+            "\nPASS {passed}   FAIL {}   CRITICAL {}   score {score:.1}%",
+            total - passed,
+            critical.len()
+        );
+        if let Some(v) = &base_version {
+            if regressions.is_empty() {
+                println!("\nNo regressions against baseline {v}.");
+            } else {
+                println!("\nREGRESSIONS against baseline {v}:");
+                for k in &regressions {
+                    println!("  {k}");
+                }
+            }
+        }
+        for r in &critical {
+            println!(
+                "\nCRITICAL  {}\n  Expected {}, actual {}: the gateway granted authority it should not have.",
+                r.name, r.expect, r.actual
+            );
+            if let Some(i) = &r.invariant {
+                println!("  Invariant: {i}");
+            }
+        }
+    }
+    if passed < total {
+        bail!("{} eval scenario(s) failed", total - passed);
+    }
+    Ok(())
+}
+
+/// Logs go to stderr (`NEXUM_LOG_FORMAT=json` for log pipelines). When
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` (or `..._TRACES_ENDPOINT`) is set,
+/// `nexum.authorize` spans are also exported over OTLP/HTTP; the standard
+/// `OTEL_*` variables apply.
+fn init_telemetry() -> Result<Option<opentelemetry_sdk::trace::SdkTracerProvider>> {
+    use opentelemetry::trace::TracerProvider;
+    use tracing_subscriber::prelude::*;
+
+    // Read W3C `traceparent` even without export, so audit events carry the
+    // caller's trace id for cross-gateway correlation.
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let fmt = tracing_subscriber::fmt::layer();
+    let fmt = if std::env::var("NEXUM_LOG_FORMAT").is_ok_and(|v| v == "json") {
+        fmt.json().boxed()
+    } else {
+        fmt.boxed()
+    };
+    let endpoint = [
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ]
+    .into_iter()
+    .find_map(|k| std::env::var(k).ok());
+    let provider = match endpoint {
+        None => None,
+        // MINIMAL: plain HTTP to a local/sidecar collector only. TLS here
+        // would pull a second rustls crypto provider (aws-lc); add it via
+        // reqwest's ring backend if a direct-to-SaaS export is needed.
+        Some(e) if e.starts_with("https:") => {
+            bail!("OTLP over https is not supported; export to a local OpenTelemetry Collector")
+        }
+        Some(_) => {
+            // The blocking HTTP client must be built off the async runtime.
+            let exporter = std::thread::spawn(|| {
+                opentelemetry_otlp::SpanExporter::builder()
+                    .with_http()
+                    .build()
+            })
+            .join()
+            .map_err(|_| anyhow::anyhow!("OTLP exporter setup panicked"))?
+            .context("building OTLP exporter")?;
+            let mut resource = opentelemetry_sdk::Resource::builder();
+            if std::env::var_os("OTEL_SERVICE_NAME").is_none() {
+                resource = resource.with_service_name("nexum-gateway");
+            }
+            Some(
+                opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                    .with_batch_exporter(exporter)
+                    .with_resource(resource.build())
+                    .build(),
+            )
+        }
+    };
+    let otel = provider
+        .as_ref()
+        .map(|p| tracing_opentelemetry::layer().with_tracer(p.tracer("nexum")));
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt)
+        .with(otel)
+        .init();
+    Ok(provider)
 }
 
 // ---------- helpers ----------
@@ -382,6 +672,56 @@ fn base_dir(config: &Path) -> &Path {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."))
+}
+
+/// Record an administrative action in this gateway's audit chain, after the
+/// action itself succeeded. An audit failure is reported as an error so the
+/// operator knows the action happened but is not on record.
+fn record_admin(config: &Path, mut r: nexum_audit::AuditRecord) -> Result<()> {
+    let cfg = match Config::load(config) {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!(
+                "note: no gateway config at {}; {} not audited",
+                config.display(),
+                r.event_type
+            );
+            return Ok(());
+        }
+    };
+    // MINIMAL: JSONL logs cache their tail in the gateway process, so a second
+    // writer would fork the chain. Admin events need the SQLite provider
+    // (per-append transaction); a JSONL writer lock would lift this.
+    if cfg.audit.provider != "sqlite" {
+        eprintln!(
+            "note: {} not audited (requires the sqlite audit provider)",
+            r.event_type
+        );
+        return Ok(());
+    }
+    if r.operator.is_none() {
+        r.operator = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .ok();
+    }
+    let event_type = r.event_type.clone();
+    nexum_audit::open(&cfg.audit.provider, &cfg.audit.path)
+        .and_then(|log| log.append(r))
+        .with_context(|| {
+            format!("action applied, but writing the {event_type} audit event failed")
+        })?;
+    Ok(())
+}
+
+fn admin(event_type: &str) -> nexum_audit::AuditRecord {
+    nexum_audit::AuditRecord::new(event_type)
+}
+
+fn joined(v: &[impl std::fmt::Display]) -> String {
+    v.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn state(config: &Path) -> Result<State> {
@@ -588,6 +928,19 @@ fn agents(config: &Path, c: AgentsCmd) -> Result<()> {
             };
             st.register_agent(&desc)?;
             println!("registered {}", desc.id);
+            record_admin(
+                config,
+                nexum_audit::AuditRecord {
+                    agent: Some(desc.id.to_string()),
+                    organization: Some(desc.organization.to_string()),
+                    detail: Some(format!(
+                        "name={} owner={}",
+                        desc.name,
+                        desc.owner.as_deref().unwrap_or("-")
+                    )),
+                    ..admin("agent.registered")
+                },
+            )?;
         }
         AgentsCmd::List => {
             println!("{:<48} {:<20} {:<8} OWNER", "ID", "NAME", "STATUS");
@@ -613,6 +966,14 @@ fn agents(config: &Path, c: AgentsCmd) -> Result<()> {
         AgentsCmd::Revoke { id, reason } => {
             st.revoke_agent(&id, reason.as_deref())?;
             println!("revoked agent {id}");
+            record_admin(
+                config,
+                nexum_audit::AuditRecord {
+                    agent: Some(id),
+                    detail: reason,
+                    ..admin("agent.revoked")
+                },
+            )?;
         }
     }
     Ok(())
@@ -674,7 +1035,29 @@ fn grants(config: &Path, c: GrantsCmd) -> Result<()> {
                 claims.sub,
                 short_ttl(a.ttl)
             );
-            emit(a.out.as_deref(), &nexum_grant::sign_grant(&claims, &key)?)
+            emit(a.out.as_deref(), &nexum_grant::sign_grant(&claims, &key)?)?;
+            record_admin(
+                config,
+                nexum_audit::AuditRecord {
+                    agent: Some(claims.sub.to_string()),
+                    organization: Some(claims.org.to_string()),
+                    actor: claims.act.map(|a| a.sub),
+                    grant_ids: vec![claims.jti],
+                    chain: vec![claims.sub.to_string()],
+                    value: claims.max_value,
+                    purpose: claims.purpose,
+                    detail: Some(format!(
+                        "cap={} res={} delegatable={} max_depth={} aud={} ttl={}",
+                        joined(&claims.cap),
+                        joined(&claims.res),
+                        joined(&claims.dcap),
+                        claims.mdd,
+                        joined(&claims.aud),
+                        a.ttl
+                    )),
+                    ..admin("grant.issued")
+                },
+            )
         }
         GrantsCmd::Delegate(a) => {
             let chain: Vec<String> = a
@@ -716,7 +1099,27 @@ fn grants(config: &Path, c: GrantsCmd) -> Result<()> {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
-            emit(a.out.as_deref(), &nexum_grant::sign_grant(&child, &key)?)
+            emit(a.out.as_deref(), &nexum_grant::sign_grant(&child, &key)?)?;
+            record_admin(
+                config,
+                nexum_audit::AuditRecord {
+                    agent: Some(child.sub.to_string()),
+                    organization: Some(child.org.to_string()),
+                    actor: child.act.map(|a| a.sub),
+                    grant_ids: vec![parent.jti, child.jti],
+                    chain: vec![parent.sub.to_string(), child.sub.to_string()],
+                    value: child.max_value,
+                    purpose: child.purpose,
+                    detail: Some(format!(
+                        "cap={} res={} delegatable={} max_depth={}",
+                        joined(&child.cap),
+                        joined(&child.res),
+                        joined(&child.dcap),
+                        child.mdd
+                    )),
+                    ..admin("grant.delegated")
+                },
+            )
         }
         GrantsCmd::Inspect { grant, verify } => {
             let tok = read_token(&grant)?;
@@ -751,7 +1154,13 @@ fn grants(config: &Path, c: GrantsCmd) -> Result<()> {
         GrantsCmd::Revoke { jti } => {
             state(config)?.revoke(&RevocationTarget::Grant(jti.clone()), None)?;
             println!("revoked grant {jti}");
-            Ok(())
+            record_admin(
+                config,
+                nexum_audit::AuditRecord {
+                    grant_ids: vec![jti],
+                    ..admin("grant.revoked")
+                },
+            )
         }
     }
 }
@@ -839,7 +1248,19 @@ fn trust(config: &Path, c: TrustCmd) -> Result<()> {
             store.validate().map_err(anyhow::Error::msg)?;
             write_atomic(&cfg.trust.file, &yaml_serde::to_string(&store)?)?;
             println!("now trusting {domain}; restart the gateway to load it");
-            Ok(())
+            record_admin(
+                config,
+                nexum_audit::AuditRecord {
+                    organization: Some(domain.to_string()),
+                    detail: Some(format!(
+                        "issuer={} allow={} deny={}",
+                        store.trust_domains[&domain].issuer,
+                        joined(&allow),
+                        joined(&deny)
+                    )),
+                    ..admin("trust.established")
+                },
+            )
         }
         TrustCmd::Revoke { domain, reason } => {
             State::open(&cfg.state.file)?.revoke(
@@ -847,13 +1268,29 @@ fn trust(config: &Path, c: TrustCmd) -> Result<()> {
                 reason.as_deref(),
             )?;
             println!("revoked trust in {domain} (effective immediately)");
-            Ok(())
+            record_admin(
+                config,
+                nexum_audit::AuditRecord {
+                    organization: Some(domain),
+                    detail: reason,
+                    ..admin("trust.revoked")
+                },
+            )
         }
         TrustCmd::RevokeKey { kid, reason } => {
             State::open(&cfg.state.file)?
                 .revoke(&RevocationTarget::Key(kid.clone()), reason.as_deref())?;
             println!("revoked key {kid} (effective immediately)");
-            Ok(())
+            record_admin(
+                config,
+                nexum_audit::AuditRecord {
+                    detail: Some(format!(
+                        "kid={kid} reason={}",
+                        reason.as_deref().unwrap_or("-")
+                    )),
+                    ..admin("key.revoked")
+                },
+            )
         }
     }
 }
@@ -865,7 +1302,7 @@ fn policies(config: &Path, c: PoliciesCmd) -> Result<()> {
         PoliciesCmd::Validate { file } => {
             let path = match file {
                 Some(f) => f,
-                None => Config::load(config)?.policy.file,
+                None => Config::load(config)?.policy.builtin_file()?.to_path_buf(),
             };
             let set = nexum_gateway::load_policy(&path)?;
             for p in &set.policies {
@@ -873,9 +1310,81 @@ fn policies(config: &Path, c: PoliciesCmd) -> Result<()> {
             }
             Ok(())
         }
+        PoliciesCmd::Simulate {
+            proposed,
+            audits,
+            json,
+            fail_on_widen,
+        } => {
+            let current_path = Config::load(config)?.policy.builtin_file()?.to_path_buf();
+            let current = nexum_gateway::load_policy(&current_path)?;
+            let new = nexum_gateway::load_policy(&proposed)?;
+            let events: Vec<_> = verified_audit_events(config, audits)?
+                .into_iter()
+                .map(|(_, e)| e)
+                .collect();
+            let rep = nexum_gateway::simulate::simulate(&events, &current, &new);
+            let widened = rep.widened();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                println!(
+                    "POLICY IMPACT  {} vs {}\n",
+                    proposed.display(),
+                    current_path.display()
+                );
+                println!("  Decisions replayed:        {}", rep.decisions);
+                println!(
+                    "  Decided before policy:     {}  (identity, proof, authority or trust; unaffected)",
+                    rep.decided_before_policy
+                );
+                println!("  Re-evaluated:              {}", rep.reevaluated);
+                println!("    unchanged                {}", rep.unchanged);
+                for (t, n) in &rep.transitions {
+                    println!("    {t:<24} {n}");
+                }
+                if rep.insufficient_data > 0 {
+                    println!(
+                        "  Not re-evaluated:          {}  (recorded before chain/value were audited)",
+                        rep.insufficient_data
+                    );
+                }
+                println!(
+                    "\n  Affected agents: {}   organizations: {}",
+                    rep.affected_agents.len(),
+                    rep.affected_organizations.len()
+                );
+                if widened > 0 {
+                    println!(
+                        "\nHIGH-RISK CHANGE: {widened} recorded decision(s) would become more permissive"
+                    );
+                }
+                for c in rep.changes.iter().take(20) {
+                    println!(
+                        "  {} {:<40} {} {}{}  {} → {}  ({} → {})",
+                        if c.widens { "▲" } else { "▼" },
+                        c.agent,
+                        c.action,
+                        c.resource,
+                        c.value.map(|v| format!(" value {v}")).unwrap_or_default(),
+                        c.before,
+                        c.after,
+                        c.before_rule.as_deref().unwrap_or("default deny"),
+                        c.after_rule.as_deref().unwrap_or("default deny"),
+                    );
+                }
+                if rep.changes.len() > 20 {
+                    println!("  … {} more (use --json)", rep.changes.len() - 20);
+                }
+            }
+            if fail_on_widen && widened > 0 {
+                bail!("{widened} decision(s) would become more permissive");
+            }
+            Ok(())
+        }
         PoliciesCmd::Test(a) => {
             let cfg = Config::load(config)?;
-            let set = nexum_gateway::load_policy(&cfg.policy.file)?;
+            let set = nexum_gateway::load_policy(cfg.policy.builtin_file()?)?;
             let store = nexum_gateway::load_trust(&cfg.trust.file)?;
             let subject = AgentId::parse(&a.agent)?;
             let org = subject.trust_domain();
@@ -956,6 +1465,7 @@ fn policies(config: &Path, c: PoliciesCmd) -> Result<()> {
 
 fn approvals(config: &Path, c: ApprovalsCmd) -> Result<()> {
     let st = state(config)?;
+    let approve = matches!(c, ApprovalsCmd::Approve { .. });
     match c {
         ApprovalsCmd::List { all } => {
             let t = chrono::Utc::now();
@@ -981,13 +1491,35 @@ fn approvals(config: &Path, c: ApprovalsCmd) -> Result<()> {
                 }
             }
         }
-        ApprovalsCmd::Approve { id, by } => {
-            st.decide_approval(&id, true, &by)?;
-            println!("approved {id} (single use; the agent must retry with Nexum-Approval: {id})");
-        }
-        ApprovalsCmd::Reject { id, by } => {
-            st.decide_approval(&id, false, &by)?;
-            println!("rejected {id}");
+        ApprovalsCmd::Approve { id, by } | ApprovalsCmd::Reject { id, by } => {
+            st.decide_approval(&id, approve, &by)?;
+            if approve {
+                println!(
+                    "approved {id} (single use; the agent must retry with Nexum-Approval: {id})"
+                );
+            } else {
+                println!("rejected {id}");
+            }
+            let a = st.approvals()?.into_iter().find(|a| a.id.to_string() == id);
+            record_admin(
+                config,
+                nexum_audit::AuditRecord {
+                    approval_id: a.as_ref().map(|a| a.id),
+                    request_id: a.as_ref().map_or_else(uuid::Uuid::now_v7, |a| a.request_id),
+                    agent: a.as_ref().map(|a| a.requested_by.to_string()),
+                    actor: a.as_ref().and_then(|a| a.actor.clone()),
+                    action: a.as_ref().map(|a| a.action.to_string()),
+                    resource: a.as_ref().map(|a| a.resource.to_string()),
+                    value: a.as_ref().and_then(|a| a.value),
+                    policy: a.and_then(|a| a.policy),
+                    operator: Some(by),
+                    ..admin(if approve {
+                        "approval.approved"
+                    } else {
+                        "approval.rejected"
+                    })
+                },
+            )?;
         }
     }
     Ok(())
@@ -1004,9 +1536,13 @@ fn audit(config: &Path, c: AuditCmd) -> Result<()> {
             "#{:<5} {}  {:<16}  {:<44}  {:<24}  {}",
             e.seq,
             r.timestamp.format("%Y-%m-%dT%H:%M:%SZ"),
-            r.decision.map(|d| d.to_string()).unwrap_or_default(),
-            r.agent.as_deref().unwrap_or("-"),
-            r.action.as_deref().unwrap_or("-"),
+            r.decision
+                .map_or_else(|| r.event_type.clone(), |d| d.to_string()),
+            r.agent
+                .as_deref()
+                .or(r.organization.as_deref())
+                .unwrap_or("-"),
+            r.action.as_deref().or(r.detail.as_deref()).unwrap_or("-"),
             r.reason_codes
                 .iter()
                 .map(|c| c.code())
@@ -1044,6 +1580,336 @@ fn audit(config: &Path, c: AuditCmd) -> Result<()> {
             let n = log.verify()?;
             println!("audit chain intact: {n} events");
         }
+    }
+    Ok(())
+}
+
+// ---------- discover ----------
+
+async fn discover_a2a(config: &Path, urls: &[String], json: bool) -> Result<()> {
+    let registry = match Config::load(config) {
+        Ok(cfg) => State::open(&cfg.state.file)?.agents()?,
+        Err(_) => vec![],
+    };
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let mut found = Vec::new();
+    for url in urls {
+        let card_url = if url.ends_with(".json") {
+            url.clone()
+        } else {
+            format!("{}/.well-known/agent-card.json", url.trim_end_matches('/'))
+        };
+        let fetched = async {
+            let resp = http.get(&card_url).send().await?.error_for_status()?;
+            let body = resp.bytes().await?;
+            anyhow::ensure!(body.len() <= 1 << 20, "agent card larger than 1 MiB");
+            Ok::<Value, anyhow::Error>(serde_json::from_slice(&body)?)
+        }
+        .await;
+        match fetched {
+            Ok(card) => found.push(nexum_gateway::discover::summarize(
+                &card_url, &card, &registry,
+            )),
+            Err(e) => eprintln!("{card_url}: {e:#}"),
+        }
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&found)?);
+        return Ok(());
+    }
+    let managed = found.iter().filter(|d| d.managed_as.is_some()).count();
+    println!(
+        "{} agents discovered: {managed} managed, {} unmanaged\n",
+        found.len(),
+        found.len() - managed
+    );
+    for d in &found {
+        println!(
+            "{}  ({})",
+            d.name,
+            d.organization.as_deref().unwrap_or("unknown provider")
+        );
+        println!("  card:      {}", d.source);
+        println!("  endpoints: {}", d.endpoints.join(", "));
+        println!("  skills:    {}", d.skills.join(", "));
+        println!(
+            "  auth:      {}",
+            if d.auth_schemes.is_empty() {
+                "-".into()
+            } else {
+                d.auth_schemes.join(", ")
+            }
+        );
+        println!("  managed:   {}", d.managed_as.as_deref().unwrap_or("no"));
+        for f in &d.findings {
+            println!("  ! {f}");
+        }
+        println!();
+    }
+    Ok(())
+}
+
+// ---------- risk ----------
+
+fn risk_scan(config: &Path, days: i64, json: bool) -> Result<()> {
+    use nexum_gateway::risk::{Severity, scan};
+    let cfg = Config::load(config)?;
+    let trust = nexum_gateway::load_trust(&cfg.trust.file)?;
+    let policy = match cfg.policy.builtin_file() {
+        Ok(f) => Some(nexum_gateway::load_policy(f)?),
+        Err(_) => None,
+    };
+    let agents = State::open(&cfg.state.file)?.agents()?;
+    let events: Vec<_> = verified_audit_events(config, vec![])?
+        .into_iter()
+        .map(|(_, e)| e)
+        .collect();
+    let own = TrustDomain::parse(&cfg.gateway.audience)?;
+    let since = chrono::Utc::now() - chrono::Duration::days(days);
+    let findings = scan(&own, &trust, policy.as_ref(), &agents, &events, since);
+    let count = |s| findings.iter().filter(|f| f.severity == s).count();
+    let high = count(Severity::High);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&findings)?);
+    } else {
+        println!(
+            "NEXUM RISK SCAN  {}  (audit: last {days} days)\n\nHIGH {high}   MEDIUM {}   LOW {}\n",
+            cfg.gateway.audience,
+            count(Severity::Medium),
+            count(Severity::Low)
+        );
+        if policy.is_none() {
+            println!("  (external policy engine: policy findings skipped)\n");
+        }
+        for f in &findings {
+            println!(
+                "{:<7} {:<30} {}",
+                format!("{:?}", f.severity).to_uppercase(),
+                f.id,
+                f.subject
+            );
+            println!("        {}", f.evidence);
+            println!("        fix: {}\n", f.fix);
+        }
+    }
+    if high > 0 {
+        bail!("{high} high-risk finding(s)");
+    }
+    Ok(())
+}
+
+// ---------- trace ----------
+
+/// Where reason codes are documented.
+const ERRORS_URL: &str = "https://swaroski.github.io/nexum/errors";
+
+fn error_url(code: &str) -> String {
+    format!("{ERRORS_URL}/{}/", code.to_ascii_lowercase())
+}
+
+/// Per-stage result of one decision, derived from its reason code: the
+/// pipeline is ordered, so stages before the deciding one passed and stages
+/// after a denial never ran.
+fn stage_checks(r: &nexum_audit::AuditRecord) -> Vec<(nexum_core::Stage, &'static str)> {
+    use nexum_core::Stage;
+    let Some(code) = r.reason_codes.first().copied() else {
+        return vec![];
+    };
+    let at = code.stage();
+    let outcome = r.decision.unwrap_or(Outcome::Deny);
+    Stage::ALL
+        .into_iter()
+        .map(|s| {
+            let status = if s == Stage::Audit {
+                "RECORDED"
+            } else if s < at {
+                "PASS"
+            } else if s == at {
+                match outcome {
+                    Outcome::RequireApproval => "APPROVAL REQUIRED",
+                    Outcome::Allow => "PASS",
+                    Outcome::Deny => "FAIL",
+                }
+            } else {
+                match (outcome, s) {
+                    (Outcome::Allow, Stage::Approval) => "NOT REQUIRED",
+                    (Outcome::RequireApproval, Stage::Approval) => "PENDING",
+                    _ => "NOT EVALUATED",
+                }
+            };
+            (s, status)
+        })
+        .collect()
+}
+
+/// Open audit logs (`--audit` paths, or this gateway's) and verify each hash
+/// chain before anything is read from it.
+fn verified_audit_events(
+    config: &Path,
+    audits: Vec<PathBuf>,
+) -> Result<Vec<(String, nexum_audit::AuditEvent)>> {
+    let audits = if audits.is_empty() {
+        let cfg = Config::load(config)?;
+        vec![(cfg.audit.provider, cfg.audit.path)]
+    } else {
+        audits
+            .into_iter()
+            .map(|p| {
+                let provider = if p.extension().is_some_and(|e| e == "jsonl") {
+                    "jsonl"
+                } else {
+                    "sqlite"
+                };
+                (provider.to_owned(), p)
+            })
+            .collect()
+    };
+    let mut out = Vec::new();
+    for (provider, path) in &audits {
+        if !path.exists() {
+            bail!("audit log {} does not exist", path.display());
+        }
+        let log = nexum_audit::open(provider, path)?;
+        log.verify()
+            .with_context(|| format!("audit log {} failed verification", path.display()))?;
+        let name = path.display().to_string();
+        out.extend(log.read_all()?.into_iter().map(|e| (name.clone(), e)));
+    }
+    Ok(out)
+}
+
+/// One hop of an authority trace (schema: docs "Tracing and observability").
+fn hop_json(log: &str, e: &nexum_audit::AuditEvent) -> Value {
+    let r = &e.record;
+    let code = r.reason_codes.first().copied();
+    serde_json::json!({
+        "audit_log": log,
+        "seq": e.seq,
+        "event_hash": e.event_hash,
+        "timestamp": r.timestamp,
+        "request_id": r.request_id,
+        "decision_id": r.decision_id,
+        "trace_id": r.trace_id,
+        "protocol": r.protocol,
+        "actor": r.actor,
+        "organization": r.organization,
+        "agent": r.agent,
+        "delegation_chain": r.chain,
+        "grant_ids": r.grant_ids,
+        "action": r.action,
+        "resource": r.resource,
+        "value": r.value,
+        "purpose": r.purpose,
+        "checks": stage_checks(r)
+            .iter()
+            .map(|(s, st)| serde_json::json!({"stage": s, "label": s.label(), "status": st}))
+            .collect::<Vec<_>>(),
+        "decision": r.decision,
+        "reason_code": code.map(ReasonCode::code),
+        "reason": code.map(ReasonCode::describe),
+        "security_event": code.and_then(ReasonCode::security_event),
+        "policy": r.policy,
+        "approval_id": r.approval_id,
+    })
+}
+
+fn trace_inspect(config: &Path, id: &str, audits: Vec<PathBuf>, json: bool) -> Result<()> {
+    let mut hops: Vec<_> = verified_audit_events(config, audits)?
+        .into_iter()
+        .filter(|(_, e)| {
+            let r = &e.record;
+            r.event_type == "authorization.decision"
+                && (r.request_id.to_string() == id
+                    || r.decision_id.is_some_and(|d| d.to_string() == id)
+                    || r.trace_id.as_deref() == Some(id))
+        })
+        .collect();
+    if hops.is_empty() {
+        bail!("no decision with request, decision or trace id {id}");
+    }
+    hops.sort_by_key(|(_, e)| e.record.timestamp);
+
+    if json {
+        let hops: Vec<Value> = hops.iter().map(|(log, e)| hop_json(log, e)).collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "id": id, "hops": hops }))?
+        );
+        return Ok(());
+    }
+
+    if hops.len() > 1 {
+        println!("Authority trace {id}: {} network hops\n", hops.len());
+    }
+    for (i, (log, e)) in hops.iter().enumerate() {
+        let r = &e.record;
+        let code = r.reason_codes.first().copied();
+        if hops.len() > 1 {
+            println!("── hop {} · {log} ──", i + 1);
+        }
+        println!(
+            "{} {}\n",
+            r.decision.map(|d| d.to_string()).unwrap_or_default(),
+            code.map(ReasonCode::code).unwrap_or("")
+        );
+        println!("  Request:    {}", r.request_id);
+        if let Some(t) = &r.trace_id {
+            println!("  Trace:      {t}  (caller-asserted)");
+        }
+        println!(
+            "  When:       {}  via {}",
+            r.timestamp.format("%Y-%m-%dT%H:%M:%SZ"),
+            r.protocol.as_deref().unwrap_or("-")
+        );
+        if let Some(a) = &r.actor {
+            println!("  On behalf:  {a}");
+        }
+        // Logical delegation, which may differ from the network path above.
+        match r.chain.split_first() {
+            Some((root, rest)) => {
+                println!(
+                    "  Authority:  {root}  (root grant from {})",
+                    r.organization.as_deref().unwrap_or("-")
+                );
+                for sub in rest {
+                    println!("                ↓ delegated\n              {sub}");
+                }
+            }
+            None => println!("  Agent:      {}", r.agent.as_deref().unwrap_or("-")),
+        }
+        let value = r.value.map(|v| format!("  value {v}")).unwrap_or_default();
+        println!(
+            "  Requested:  {}  {}{value}",
+            r.action.as_deref().unwrap_or("-"),
+            r.resource.as_deref().unwrap_or("-")
+        );
+        if let Some(p) = &r.purpose {
+            println!("  Purpose:    {p}");
+        }
+        println!();
+        for (stage, status) in stage_checks(r) {
+            println!("  {:<30}{status}", stage.label());
+        }
+        println!();
+        if let Some(c) = code {
+            println!("  Reason:     {}", c.describe());
+            if let Some(ev) = c.security_event() {
+                println!("  Security:   {ev}");
+            }
+        }
+        if let Some(p) = &r.policy {
+            println!("  Policy:     {p}");
+        }
+        if let Some(a) = r.approval_id {
+            println!("  Approval:   {a}");
+        }
+        println!("  Audit:      event #{} in {log} (chain verified)", e.seq);
+        if let Some(c) = code.filter(|_| r.decision != Some(Outcome::Allow)) {
+            println!("  Learn more: {}", error_url(c.code()));
+        }
+        println!();
     }
     Ok(())
 }
@@ -1119,6 +1985,9 @@ async fn call(a: CallArgs) -> Result<()> {
     }
     println!("  Decision:   {}", d["decision_id"].as_str().unwrap_or("-"));
     if outcome != "ALLOW" {
+        if let Some(code) = resp["code"].as_str() {
+            println!("  Learn more: {}", error_url(code));
+        }
         std::process::exit(if outcome == "DENY" { 2 } else { 3 });
     }
     Ok(())
@@ -1152,8 +2021,16 @@ fn doctor(config: &Path) -> Result<()> {
     );
     check(
         "policy",
-        nexum_gateway::load_policy(&cfg.policy.file)
-            .map(|p| format!("{} policies", p.policies.len())),
+        match cfg.policy.url.as_deref() {
+            Some(url) => Ok(format!(
+                "OPA at {url} (not contacted; run `nexum eval run`)"
+            )),
+            None => cfg
+                .policy
+                .builtin_file()
+                .and_then(nexum_gateway::load_policy)
+                .map(|p| format!("{} policies", p.policies.len())),
+        },
     );
     check(
         "state",

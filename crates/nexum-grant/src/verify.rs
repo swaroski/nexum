@@ -9,7 +9,10 @@ use std::sync::Mutex;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use ed25519_dalek::VerifyingKey;
-use nexum_core::{ReasonCode, RevocationList, RevocationTarget};
+use nexum_core::{
+    AuthorizationRequest, Capability, DelegationLink, GrantedAuthority, ReasonCode, RequestContext,
+    ResourcePattern, RevocationList, RevocationTarget,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -74,6 +77,49 @@ impl VerifiedChain {
     }
     pub fn earliest_expiry(&self) -> i64 {
         self.grants.iter().map(|g| g.exp).min().unwrap_or(0)
+    }
+
+    /// The canonical request for `action` on `resource` made with this chain:
+    /// subject and authority from the leaf, actor and organization from the
+    /// root. The one place requests are built (gateway, eval, playground).
+    pub fn to_request(
+        &self,
+        request_id: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        action: Capability,
+        resource: ResourcePattern,
+        context: RequestContext,
+    ) -> AuthorizationRequest {
+        let ts = |secs: i64| chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default();
+        let (root, leaf) = (self.root(), self.leaf());
+        AuthorizationRequest {
+            request_id,
+            timestamp: now,
+            subject: leaf.sub.clone(),
+            actor: root.act.as_ref().map(|a| a.sub.clone()),
+            organization: root.org.clone(),
+            action,
+            resource,
+            purpose: leaf.purpose.clone(),
+            delegation_chain: self
+                .grants
+                .iter()
+                .map(|g| DelegationLink {
+                    grant_id: g.jti.clone(),
+                    issuer: g.iss.clone(),
+                    subject: g.sub.clone(),
+                    capabilities: g.cap.clone(),
+                    expires_at: ts(g.exp),
+                })
+                .collect(),
+            authority: GrantedAuthority {
+                capabilities: leaf.cap.clone(),
+                resources: leaf.res.clone(),
+                max_value: leaf.max_value,
+                expires_at: ts(self.earliest_expiry()),
+            },
+            context,
+        }
     }
 }
 

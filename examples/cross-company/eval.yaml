@@ -1,0 +1,96 @@
+# Security evals for Supplier ABC's gateway, from XYZ Corporation's side.
+#
+#   nexum -c abc/nexum.yaml eval run examples/cross-company/eval.yaml
+#
+# Every ALLOW scenario is also re-run under each built-in attack (replay,
+# stolen grant, expiry, wrong audience, untrusted issuer, tampering,
+# revocation, body swap), each of which must be denied.
+apiVersion: nexum.dev/v1alpha1
+kind: EvalSuite
+org: xyz.com
+scenarios:
+  - name: procurement-reads-inventory
+    grants:
+      - sub: spiffe://xyz.com/agents/procurement
+        cap: [inventory.read, pricing.read, quote.create]
+        res: ["supplier://abc/*"]
+        actor: jane@xyz.com
+    request: { action: inventory.read, resource: "supplier://abc/sku/123" }
+    expect: ALLOW
+
+  - name: delegated-worker-reads-inventory
+    grants:
+      - sub: spiffe://xyz.com/agents/procurement
+        cap: [inventory.read, pricing.read]
+        res: ["supplier://abc/*"]
+        dcap: [inventory.read]
+        max_depth: 1
+      - sub: spiffe://xyz.com/agents/inventory-checker
+        cap: [inventory.read]
+    request: { action: inventory.read, resource: "supplier://abc/sku/123" }
+    expect: ALLOW
+
+  - name: compromised-worker-escalation
+    grants:
+      - sub: spiffe://xyz.com/agents/procurement
+        cap: [inventory.read, pricing.read]
+        res: ["supplier://abc/*"]
+        dcap: [inventory.read]
+        max_depth: 1
+      - sub: spiffe://xyz.com/agents/inventory-checker
+        cap: [inventory.read]
+    request: { action: payment.execute, resource: "supplier://abc/invoice/9", value: 10 }
+    expect: DENY
+    code: NX-4032
+
+  - name: delegation-amplification
+    grants:
+      - sub: spiffe://xyz.com/agents/procurement
+        cap: [inventory.read, pricing.read]
+        res: ["supplier://abc/*"]
+        dcap: [inventory.read]
+        max_depth: 1
+      - sub: spiffe://xyz.com/agents/inventory-checker
+        cap: [inventory.read, pricing.read]
+    request: { action: pricing.read, resource: "supplier://abc/sku/123" }
+    expect: DENY
+    code: NX-1013
+
+  - name: delegation-depth-exceeded
+    grants:
+      - sub: spiffe://xyz.com/agents/procurement
+        cap: [inventory.read]
+        res: ["supplier://abc/*"]
+        dcap: [inventory.read]
+      - sub: spiffe://xyz.com/agents/inventory-checker
+        cap: [inventory.read]
+    request: { action: inventory.read, resource: "supplier://abc/sku/123" }
+    expect: DENY
+    code: NX-1015
+
+  - name: resource-outside-grant
+    grants:
+      - sub: spiffe://xyz.com/agents/procurement
+        cap: [inventory.read]
+        res: ["supplier://abc/sku/*"]
+    request: { action: inventory.read, resource: "supplier://abc/customers/1" }
+    expect: DENY
+    code: NX-4033
+
+  - name: trust-denies-payments-even-if-granted
+    grants:
+      - sub: spiffe://xyz.com/agents/procurement
+        cap: [payment.execute]
+        res: ["supplier://abc/*"]
+    request: { action: payment.execute, resource: "supplier://abc/invoice/9", value: 10 }
+    expect: DENY
+    code: NX-4031
+
+  - name: large-quote-needs-approval
+    grants:
+      - sub: spiffe://xyz.com/agents/procurement
+        cap: [quote.create]
+        res: ["supplier://abc/*"]
+    request: { action: quote.create, resource: "supplier://abc/quote/new", value: 250000 }
+    expect: REQUIRE_APPROVAL
+    code: NX-4002

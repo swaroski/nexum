@@ -1,0 +1,41 @@
+# Cross-company: ACME applies its own trust list and policy to partner.example.
+apiVersion: nexum.dev/v1alpha1
+kind: EvalSuite
+category: federation
+org: partner.example
+scenarios:
+  - name: partner-payment-blocked-by-trust
+    description: partner.example issued itself payment.execute; ACME never accepts it from them.
+    invariant: A partner cannot grant itself capabilities the receiving organization does not trust it with.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [payment.execute], res: ["erp://acme/*"] }
+    request: { action: payment.execute, resource: "erp://acme/invoice/9", value: 10 }
+    expect: DENY
+    code: NX-4031
+
+  - name: unexpected-external-capability
+    description: A capability ACME's trust list never mentions.
+    invariant: Trust is an allow-list; unknown capabilities are denied.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [ledger.write], res: ["erp://acme/*"] }
+    request: { action: ledger.write, resource: "erp://acme/ledger/1" }
+    expect: DENY
+    code: NX-4031
+
+  - name: cross-tenant-resource
+    description: A grant for ACME's ERP used against another tenant's.
+    invariant: Authority is bound to the delegated resources.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read], res: ["erp://acme/*"] }
+    request: { action: inventory.read, resource: "erp://other-tenant/inventory/sku-1" }
+    expect: DENY
+    code: NX-4033
+
+  - name: large-quote-needs-approval
+    description: Quotes over 100,000 need an ACME approver.
+    invariant: High-value actions wait for a human.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [quote.create], res: ["erp://acme/*"] }
+    request: { action: quote.create, resource: "erp://acme/quote/new", value: 250000 }
+    expect: REQUIRE_APPROVAL
+    code: NX-4002

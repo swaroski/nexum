@@ -67,9 +67,29 @@ fn d1mib() -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
-    /// Only `builtin` today. External PDPs plug in via `PolicyDecisionPoint`.
+    /// `builtin` (YAML `file`) or `opa` (`url` of an OPA data API rule).
     pub provider: String,
-    pub file: PathBuf,
+    #[serde(default)]
+    pub file: Option<PathBuf>,
+    /// OPA: e.g. `http://127.0.0.1:8181/v1/data/nexum/authz`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// OPA request timeout. Default 500 ms.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+impl PolicyConfig {
+    /// The built-in policy file, for commands that evaluate policy locally.
+    pub fn builtin_file(&self) -> anyhow::Result<&Path> {
+        match (&*self.provider, &self.file) {
+            ("builtin", Some(f)) => Ok(f),
+            _ => bail!(
+                "this needs the builtin policy provider (configured: {}); test external engines with `nexum eval run`",
+                self.provider
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,11 +146,12 @@ impl Config {
                 nexum_core::API_VERSION
             );
         }
-        if cfg.policy.provider != "builtin" {
-            bail!(
-                "unsupported policy provider {:?} (only `builtin` in this release)",
-                cfg.policy.provider
-            );
+        match (&*cfg.policy.provider, &cfg.policy.file, &cfg.policy.url) {
+            ("builtin", Some(_), None) => {}
+            ("opa", None, Some(u)) if u.starts_with("http://") || u.starts_with("https://") => {}
+            ("builtin", ..) => bail!("policy provider builtin needs `file` (and no `url`)"),
+            ("opa", ..) => bail!("policy provider opa needs an http(s) `url` (and no `file`)"),
+            (other, ..) => bail!("unsupported policy provider {other:?} (builtin or opa)"),
         }
         if cfg.gateway.audience.is_empty() {
             bail!("gateway.audience is required");
@@ -142,8 +163,10 @@ impl Config {
             bail!("approval_ttl_seconds and max_body_bytes must be > 0");
         }
         let base = path.parent().unwrap_or(Path::new("."));
+        if let Some(f) = cfg.policy.file.as_mut().filter(|f| f.is_relative()) {
+            *f = base.join(&*f);
+        }
         for p in [
-            &mut cfg.policy.file,
             &mut cfg.audit.path,
             &mut cfg.trust.file,
             &mut cfg.state.file,

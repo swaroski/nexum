@@ -1,0 +1,116 @@
+# Delegation may only narrow: authority(child) ⊆ authority(parent).
+apiVersion: nexum.dev/v1alpha1
+kind: EvalSuite
+category: delegation
+org: partner.example
+scenarios:
+  - name: delegated-worker-reads-inventory
+    description: Baseline. Procurement delegates inventory.read to a worker.
+    invariant: A valid, attenuated delegation is honored.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read, pricing.read], res: ["erp://acme/*"], dcap: [inventory.read], max_depth: 1, actor: jane@partner.example, purpose: rfq-8271 }
+      - { sub: spiffe://partner.example/agents/worker, cap: [inventory.read] }
+    request: { action: inventory.read, resource: "erp://acme/inventory/sku-1" }
+    expect: ALLOW
+
+  - name: worker-cannot-execute-payment
+    description: A compromised worker tries a capability nobody delegated to it.
+    invariant: A sub-agent cannot exercise authority its parent did not delegate.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read, pricing.read], res: ["erp://acme/*"], dcap: [inventory.read], max_depth: 1 }
+      - { sub: spiffe://partner.example/agents/worker, cap: [inventory.read] }
+    request: { action: payment.execute, resource: "erp://acme/invoice/9", value: 10 }
+    expect: DENY
+    code: NX-4032
+
+  - name: capability-amplification
+    description: The worker's grant claims pricing.read, which the parent may hold but not delegate.
+    invariant: A child grant cannot claim capabilities outside its parent's delegatable set.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read, pricing.read], res: ["erp://acme/*"], dcap: [inventory.read], max_depth: 1 }
+      - { sub: spiffe://partner.example/agents/worker, cap: [inventory.read, pricing.read] }
+    request: { action: pricing.read, resource: "erp://acme/pricing/sku-1" }
+    expect: DENY
+    code: NX-1013
+
+  - name: delegation-beyond-depth
+    description: The parent may not delegate at all (max_depth 0), but does.
+    invariant: Delegation depth only decreases and cannot be bypassed.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read], res: ["erp://acme/*"], dcap: [inventory.read] }
+      - { sub: spiffe://partner.example/agents/worker, cap: [inventory.read] }
+    request: { action: inventory.read, resource: "erp://acme/inventory/sku-1" }
+    expect: DENY
+    code: NX-1015
+
+  - name: resource-widening
+    description: The parent holds inventory only; the child claims all of ERP.
+    invariant: A child grant cannot widen its parent's resources.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read], res: ["erp://acme/inventory/*"], dcap: [inventory.read], max_depth: 1 }
+      - { sub: spiffe://partner.example/agents/worker, cap: [inventory.read], res: ["erp://acme/*"] }
+    request: { action: inventory.read, resource: "erp://acme/inventory/sku-1" }
+    expect: DENY
+    code: NX-1014
+
+  - name: lifetime-widening
+    description: The child grant outlives its parent.
+    invariant: A child grant cannot outlive its parent.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read], res: ["erp://acme/*"], dcap: [inventory.read], max_depth: 1, ttl_seconds: 300 }
+      - { sub: spiffe://partner.example/agents/worker, cap: [inventory.read], ttl_seconds: 600 }
+    request: { action: inventory.read, resource: "erp://acme/inventory/sku-1" }
+    expect: DENY
+    code: NX-1016
+
+  - name: value-limit-widening
+    description: The parent is capped at 1,000; the child claims 5,000.
+    invariant: Value limits can only decrease down the chain.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read], res: ["erp://acme/*"], dcap: [inventory.read], max_depth: 1, max_value: 1000 }
+      - { sub: spiffe://partner.example/agents/worker, cap: [inventory.read], max_value: 5000 }
+    request: { action: inventory.read, resource: "erp://acme/inventory/sku-1", value: 2000 }
+    expect: DENY
+    code: NX-1019
+
+  - name: purpose-mutation
+    description: The worker re-labels the purpose it was delegated for.
+    invariant: Purpose is immutable once set.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read], res: ["erp://acme/*"], dcap: [inventory.read], max_depth: 1, purpose: rfq-8271 }
+      - { sub: spiffe://partner.example/agents/worker, cap: [inventory.read], purpose: something-else }
+    request: { action: inventory.read, resource: "erp://acme/inventory/sku-1" }
+    expect: DENY
+    code: NX-1018
+
+  - name: actor-mutation
+    description: The worker claims to act for a different human.
+    invariant: The human a chain acts for is immutable.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read], res: ["erp://acme/*"], dcap: [inventory.read], max_depth: 1, actor: jane@partner.example }
+      - { sub: spiffe://partner.example/agents/worker, cap: [inventory.read], actor: cfo@partner.example }
+    request: { action: inventory.read, resource: "erp://acme/inventory/sku-1" }
+    expect: DENY
+    code: NX-1018
+
+  - name: delegation-deeper-than-policy
+    description: A valid four-agent chain, but ACME allows at most two hops.
+    invariant: The receiving organization bounds delegation depth regardless of the issuer.
+    grants:
+      - { sub: spiffe://partner.example/agents/a, cap: [inventory.read], res: ["erp://acme/*"], dcap: [inventory.read], max_depth: 3 }
+      - { sub: spiffe://partner.example/agents/b, cap: [inventory.read], dcap: [inventory.read], max_depth: 2 }
+      - { sub: spiffe://partner.example/agents/c, cap: [inventory.read], dcap: [inventory.read], max_depth: 1 }
+      - { sub: spiffe://partner.example/agents/d, cap: [inventory.read] }
+    request: { action: inventory.read, resource: "erp://acme/inventory/sku-1" }
+    expect: DENY
+    code: NX-4038
+
+  - name: delegated-quote-forbidden-by-policy
+    description: The chain legitimately delegates quote.create, but ACME only lets sub-agents read.
+    invariant: The receiving organization decides what may be exercised through delegation.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [quote.create], res: ["erp://acme/*"], dcap: [quote.create], max_depth: 1 }
+      - { sub: spiffe://partner.example/agents/worker, cap: [quote.create] }
+    request: { action: quote.create, resource: "erp://acme/quote/new", value: 10 }
+    expect: DENY
+    code: NX-4037

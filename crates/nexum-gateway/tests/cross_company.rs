@@ -489,3 +489,173 @@ async fn mcp_tool_calls_are_enforced_and_forwarded() {
     .await;
     assert_eq!((s, code(&v)), (StatusCode::FORBIDDEN, "NX-4036"));
 }
+
+#[tokio::test]
+async fn audit_records_the_authority_trace() {
+    let f = fixture(None);
+    let read = json!({"action": "inventory.read", "resource": "supplier://abc/sku/1"});
+    let tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
+    let delegated = [f.root.as_str(), f.child_grant.as_str()];
+    send(
+        &f.app,
+        "/v1/authorize",
+        &delegated,
+        &f.child,
+        &read,
+        &[("traceparent", tp)],
+    )
+    .await;
+    let pay = json!({"action": "payment.execute", "resource": "supplier://abc/i/1", "value": 7});
+    send(&f.app, "/v1/authorize", &delegated, &f.child, &pay, &[]).await;
+
+    let events = f.state.authorizer.audit.read_all().unwrap();
+    let (traced, untraced) = (&events[0].record, &events[1].record);
+    assert_eq!(
+        traced.trace_id.as_deref(),
+        Some("4bf92f3577b34da6a3ce929d0e0e4736")
+    );
+    assert_eq!(
+        traced.chain,
+        [
+            "spiffe://xyz.com/agents/procurement",
+            "spiffe://xyz.com/agents/inventory-checker"
+        ]
+    );
+    assert_eq!(traced.purpose.as_deref(), Some("q3-restock"));
+    assert_eq!(
+        (untraced.trace_id.as_deref(), untraced.value),
+        (None, Some(7))
+    );
+    assert!(
+        f.state
+            .authorizer
+            .metrics
+            .prometheus()
+            .contains("nexum_security_events_total{event=\"privilege_escalation_attempt\"} 1")
+    );
+}
+
+#[tokio::test]
+async fn policy_simulation_replays_only_policy_decisions() {
+    let f = fixture(None);
+    let quote =
+        json!({"action": "quote.create", "resource": "supplier://abc/q/1", "value": 250000});
+    send(
+        &f.app,
+        "/v1/authorize",
+        &[&f.root],
+        &f.procurement,
+        &quote,
+        &[],
+    )
+    .await;
+    let delegated = [f.root.as_str(), f.child_grant.as_str()];
+    let pay = json!({"action": "payment.execute", "resource": "supplier://abc/i/1", "value": 7});
+    send(&f.app, "/v1/authorize", &delegated, &f.child, &pay, &[]).await;
+
+    let events = f.state.authorizer.audit.read_all().unwrap();
+    let current = nexum_gateway::load_policy(&f._dir.join("policy.yaml")).unwrap();
+    let text = std::fs::read_to_string(f._dir.join("policy.yaml"))
+        .unwrap()
+        .replace("max_value: 100000", "max_value: 300000")
+        .replace("value_above: 100000", "value_above: 300000");
+    let proposed = nexum_policy::PolicySet::from_yaml(&text).unwrap();
+
+    let rep = nexum_gateway::simulate::simulate(&events, &current, &proposed);
+    assert_eq!(
+        (rep.decisions, rep.decided_before_policy, rep.reevaluated),
+        (2, 1, 1)
+    );
+    assert_eq!(rep.transitions["REQUIRE_APPROVAL → ALLOW"], 1);
+    assert_eq!(rep.widened(), 1);
+    assert!(
+        nexum_gateway::simulate::simulate(&events, &current, &current)
+            .changes
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn opa_decides_after_chain_and_trust_and_fails_closed() {
+    // Mock OPA: approval for quotes, allow for everything else.
+    let opa = Router::new().route(
+        "/v1/data/nexum/authz",
+        axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+            let input = &body["input"];
+            assert_eq!(input["organization"], "xyz.com");
+            let result = if input["action"] == "quote.create" {
+                json!({"outcome": "REQUIRE_APPROVAL", "policy_id": "rego", "rule_id": "quotes"})
+            } else {
+                json!(true)
+            };
+            axum::Json(json!({ "result": result }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, opa).await.unwrap() });
+
+    let f = fixture(None);
+    let app = with_policy(
+        &f._dir,
+        &format!("{{ provider: opa, url: \"http://{addr}/v1/data/nexum/authz\" }}"),
+    );
+
+    let read = json!({"action": "inventory.read", "resource": "supplier://abc/sku/1"});
+    let (s, v, _) = send(
+        &app,
+        "/v1/authorize",
+        &[&f.root],
+        &f.procurement,
+        &read,
+        &[],
+    )
+    .await;
+    assert_eq!((s, code(&v)), (StatusCode::OK, "NX-4001"), "{v}");
+    let quote = json!({"action": "quote.create", "resource": "supplier://abc/q", "value": 5});
+    let (s, v, _) = send(
+        &app,
+        "/v1/authorize",
+        &[&f.root],
+        &f.procurement,
+        &quote,
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+    assert_eq!(v["decision"]["matched_rule"], "quotes");
+    // OPA would allow it, but the chain doesn't carry payments: OPA is never asked.
+    let pay = json!({"action": "payment.execute", "resource": "supplier://abc/i", "value": 1});
+    let (_, v, _) = send(&app, "/v1/authorize", &[&f.root], &f.procurement, &pay, &[]).await;
+    assert_eq!(code(&v), "NX-4032");
+
+    // OPA unreachable: fail closed.
+    let down = with_policy(
+        &f._dir,
+        "{ provider: opa, url: \"http://127.0.0.1:9/v1/data/nexum/authz\", timeout_ms: 300 }",
+    );
+    let (s, v, _) = send(
+        &down,
+        "/v1/authorize",
+        &[&f.root],
+        &f.procurement,
+        &read,
+        &[],
+    )
+    .await;
+    assert_eq!((s, code(&v)), (StatusCode::FORBIDDEN, "NX-5002"));
+}
+
+/// Rebuild the fixture gateway with a different `policy:` block.
+fn with_policy(dir: &std::path::Path, policy: &str) -> Router {
+    let path = dir.join("nexum.yaml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let start = text.find("policy: {").unwrap();
+    let end = start + text[start..].find('}').unwrap() + 1;
+    let text = format!("{}policy: {policy}{}", &text[..start], &text[end..]);
+    std::fs::write(&path, text).unwrap();
+    nexum_gateway::server::router(nexum_gateway::build(&Config::load(&path).unwrap()).unwrap())
+}

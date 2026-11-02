@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nexum console</title>
+<style>
+  :root { --bg:#fff; --fg:#17202a; --muted:#5d6d7e; --line:#dfe4ea; --soft:#f4f6f8; --accent:#1d64c4;
+          --allow:#18794e; --deny:#c0392b; --approval:#a05a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12161b; --fg:#e6e9ed; --muted:#9aa5b1; --line:#2a313a; --soft:#1a2028; --accent:#5ea1f2;
+            --allow:#4cc38a; --deny:#ff6b6b; --approval:#f0a33a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:24px; padding:12px 24px; border-bottom:1px solid var(--line); }
+  header strong { font-size:18px; }
+  nav button { background:none; border:0; color:var(--muted); font:inherit; padding:6px 10px; cursor:pointer; border-radius:6px; }
+  nav button[aria-current="page"] { color:var(--fg); background:var(--soft); font-weight:600; }
+  nav button:focus-visible, button:focus-visible, a:focus-visible, input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  main { padding:24px; max-width:1200px; }
+  main:focus { outline:none; }
+  h1 { font-size:20px; margin:0 0 16px; }
+  h2 { font-size:15px; margin:24px 0 8px; }
+  .muted { color:var(--muted); }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fill, minmax(170px, 1fr)); gap:12px; }
+  .tile { border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .tile .n { font-size:24px; font-weight:600; font-variant-numeric:tabular-nums; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  td.mono, .mono { font-family:ui-monospace, monospace; font-size:12.5px; word-break:break-all; }
+  .ALLOW { color:var(--allow); font-weight:600; } .DENY { color:var(--deny); font-weight:600; }
+  .REQUIRE_APPROVAL { color:var(--approval); font-weight:600; }
+  .PASS, .RECORDED { color:var(--allow); } .FAIL { color:var(--deny); font-weight:600; }
+  .PENDING, .APPROVAL.REQUIRED { color:var(--approval); }
+  button.action { border:1px solid var(--line); background:var(--soft); color:var(--fg); border-radius:6px; padding:4px 10px; cursor:pointer; font:inherit; }
+  button.danger { color:var(--deny); }
+  a { color:var(--accent); cursor:pointer; }
+  pre { background:var(--soft); padding:12px; border-radius:8px; overflow:auto; }
+  .chain { margin:4px 0 12px; }
+  .chain div { padding-left:0; }
+  .err { color:var(--deny); }
+  label { display:inline-flex; gap:6px; align-items:center; margin-right:12px; }
+  input, select { font:inherit; padding:4px 6px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); }
+</style>
+</head>
+<body>
+<header>
+  <strong>Nexum</strong>
+  <nav aria-label="Sections">
+    <button data-view="overview">Overview</button>
+    <button data-view="decisions">Decisions</button>
+    <button data-view="agents">Agents</button>
+    <button data-view="trust">Trust</button>
+    <button data-view="approvals">Approvals</button>
+    <button data-view="policy">Policy</button>
+  </nav>
+  <span class="muted" id="gw"></span>
+</header>
+<main id="main" tabindex="-1"></main>
+<script>
+"use strict";
+const token = new URLSearchParams(location.hash.slice(1)).get("token") || sessionStorage.getItem("nexum-token");
+if (token) { sessionStorage.setItem("nexum-token", token); history.replaceState(null, "", location.pathname); }
+const main = document.getElementById("main");
+
+// Every value from the gateway is inserted as text, never as markup.
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) e.append(k instanceof Node ? k : document.createTextNode(k ?? ""));
+  return e;
+}
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" } });
+  const body = await r.json().catch(() => ({ error: r.statusText }));
+  if (!r.ok) throw new Error(body.error || r.statusText);
+  return body;
+}
+function table(cols, rows) {
+  return el("table", {}, el("thead", {}, el("tr", {}, cols.map(c => el("th", { scope: "col" }, c[0])))),
+    el("tbody", {}, rows.map(r => el("tr", {}, cols.map(c => { const v = c[1](r); return v instanceof Node ? el("td", {}, v) : el("td", { class: c[2] || "" }, v); })))));
+}
+const time = t => new Date(t).toLocaleString();
+const outcome = d => el("span", { class: d || "" }, d || "");
+
+const views = {
+  async overview() {
+    const o = await api("/api/overview");
+    document.getElementById("gw").textContent = "gateway " + o.gateway + " · policy " + o.policy_provider;
+    const n = k => o.last_24h[k] || 0;
+    const tile = (label, v) => el("div", { class: "tile" }, el("div", { class: "muted" }, label), el("div", { class: "n" }, String(v)));
+    const sec = Object.entries(o.security_events_24h);
+    return [el("h1", {}, "Overview"),
+      el("p", { class: "muted" }, `Audit log verified: ${o.audit_events} events, hash chain intact.`),
+      el("h2", {}, "Last 24 hours"),
+      el("div", { class: "tiles" }, tile("Allowed", n("ALLOW")), tile("Denied", n("DENY")), tile("Approval required", n("REQUIRE_APPROVAL")),
+        tile("Security events", sec.reduce((a, [, v]) => a + v, 0)), tile("Pending approvals", o.pending_approvals)),
+      el("h2", {}, "Estate"),
+      el("div", { class: "tiles" }, tile("Agents", o.agents), tile("Revoked agents", o.agents_revoked),
+        tile("Trusted organizations", o.trust_domains), tile("Revocations", o.revocations)),
+      el("h2", {}, "Security events (24h)"),
+      sec.length ? table([["Event", r => r[0], "mono"], ["Count", r => String(r[1])]], sec) : el("p", { class: "muted" }, "None.")];
+  },
+  async decisions() {
+    const rows = await api("/api/events?limit=300");
+    return [el("h1", {}, "Decisions and administrative events"),
+      table([["#", r => String(r.seq)], ["Time", r => time(r.timestamp)],
+        ["Outcome", r => r.decision ? outcome(r.decision) : el("span", { class: "muted" }, r.event_type)],
+        ["Code", r => r.reason_code || "", "mono"],
+        ["Agent / org", r => r.agent || r.organization || "", "mono"],
+        ["Action", r => r.action || r.detail || "", "mono"], ["Resource", r => r.resource || "", "mono"],
+        ["", r => r.decision ? el("a", { onclick: () => show("trace", r.request_id), href: "#" }, "trace") : ""]], rows)];
+  },
+  async trace(id) {
+    const t = await api("/api/trace/" + encodeURIComponent(id));
+    const out = [el("h1", {}, "Authority trace"), el("p", { class: "mono muted" }, id)];
+    for (const h of t.hops) {
+      const chain = h.delegation_chain.length ? h.delegation_chain : [h.agent || "-"];
+      out.push(el("h2", {}, outcome(h.decision), " ", h.reason_code || ""),
+        el("p", {}, h.reason || ""),
+        table([["", r => r[0]], ["", r => r[1], "mono"]], [
+          ["When", time(h.timestamp) + " via " + (h.protocol || "-")], ["On behalf of", h.actor || "-"],
+          ["Organization", h.organization || "-"], ["Requested", (h.action || "-") + "  " + (h.resource || "") + (h.value != null ? "  value " + h.value : "")],
+          ["Purpose", h.purpose || "-"], ["Policy", h.policy || "-"], ["Security event", h.security_event || "-"],
+          ["Trace id (caller-asserted)", h.trace_id || "-"], ["Audit", "event #" + h.seq + " " + h.event_hash.slice(0, 16) + "…"]]),
+        el("h2", {}, "Delegation chain"),
+        el("div", { class: "chain mono" }, chain.map((s, i) => el("div", {}, (i ? "↓ delegated  " : "root  ") + s))),
+        el("h2", {}, "Checks"),
+        table([["Stage", c => c.label], ["Result", c => el("span", { class: c.status }, c.status)]], h.checks));
+    }
+    return out;
+  },
+  async agents() {
+    const rows = await api("/api/agents");
+    return [el("h1", {}, "Agents"), table([["Agent", r => r.id, "mono"], ["Name", r => r.name], ["Owner", r => r.owner || "-"],
+      ["Framework", r => r.framework || "-"], ["Environment", r => r.environment || "-"], ["Status", r => r.status],
+      ["", r => r.status === "active" ? el("button", { class: "action danger", onclick: () => revoke("agent", r.id) }, "Revoke") : ""]], rows)];
+  },
+  async trust() {
+    const t = await api("/api/trust");
+    return [el("h1", {}, "Trusted organizations"),
+      table([["Organization", r => r.domain, "mono"], ["Issuer", r => r.issuer, "mono"], ["Allow", r => r.allow.join(", "), "mono"],
+        ["Deny", r => r.deny.join(", "), "mono"], ["Max grant TTL", r => r.max_grant_ttl_seconds + "s"],
+        ["Status", r => r.revoked ? el("span", { class: "DENY" }, "revoked") : "trusted"],
+        ["", r => r.revoked ? "" : el("button", { class: "action danger", onclick: () => revoke("trust_domain", r.domain) }, "Revoke trust")]], t.domains),
+      el("h2", {}, "Revocations"),
+      t.revocations.length ? table([["Kind", r => r.target.kind], ["Value", r => r.target.value, "mono"], ["Reason", r => r.reason || "-"], ["When", r => time(r.revoked_at)]], t.revocations)
+        : el("p", { class: "muted" }, "None.")];
+  },
+  async approvals() {
+    const rows = (await api("/api/approvals")).reverse();
+    const now = Date.now();
+    return [el("h1", {}, "Approvals"),
+      el("p", { class: "muted" }, "Approvals are single-use and bound to the exact request. The agent retries the identical request with the approval id."),
+      table([["Requested", r => time(r.created_at)], ["Agent", r => r.requested_by, "mono"], ["On behalf of", r => r.actor || "-"],
+        ["Action", r => r.action, "mono"], ["Resource", r => r.resource, "mono"], ["Value", r => r.value != null ? String(r.value) : "-"],
+        ["Policy", r => r.policy || "-"], ["Status", r => new Date(r.expires_at) < now && r.status === "pending" ? "expired" : r.status],
+        ["", r => r.status === "pending" && new Date(r.expires_at) > now ? el("span", {},
+          el("button", { class: "action", onclick: () => decide(r.id, "approve") }, "Approve"), " ",
+          el("button", { class: "action danger", onclick: () => decide(r.id, "reject") }, "Reject")) : ""]], rows)];
+  },
+  async policy() {
+    const p = await api("/api/policy");
+    return [el("h1", {}, "Policy"), p.text != null ? [el("p", { class: "muted mono" }, p.file), el("pre", { class: "mono" }, p.text)]
+      : el("p", {}, "External policy engine: " + p.provider + " at ", el("span", { class: "mono" }, p.url || ""))];
+  },
+};
+
+async function decide(id, verdict) {
+  if (!confirm(verdict === "approve" ? "Approve this request? It can be used once." : "Reject this request?")) return;
+  try { await api(`/api/approvals/${encodeURIComponent(id)}/${verdict}`, { method: "POST" }); show("approvals"); }
+  catch (e) { alert(e.message); }
+}
+async function revoke(kind, value) {
+  const reason = prompt(`Revoke ${kind} ${value}? This takes effect immediately on the gateway.\nReason:`);
+  if (reason === null) return;
+  try { await api("/api/revoke", { method: "POST", body: JSON.stringify({ kind, value, reason }) }); show(kind === "agent" ? "agents" : "trust"); }
+  catch (e) { alert(e.message); }
+}
+async function show(view, arg) {
+  for (const b of document.querySelectorAll("nav button")) {
+    if (b.dataset.view === view) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+  }
+  main.replaceChildren(el("p", { class: "muted" }, "Loading…"));
+  try { main.replaceChildren(...[await views[view](arg)].flat(2)); }
+  catch (e) { main.replaceChildren(el("p", { class: "err", role: "alert" }, "Error: " + e.message)); }
+  main.focus();
+}
+for (const b of document.querySelectorAll("nav button")) b.addEventListener("click", () => show(b.dataset.view));
+if (!token) main.replaceChildren(el("p", { class: "err", role: "alert" }, "Open the URL printed by `nexum console` (it contains the session token)."));
+else show("overview");
+</script>
+</body>
+</html>

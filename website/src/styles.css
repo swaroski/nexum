@@ -1,0 +1,49 @@
+:root {
+  --sl-color-accent-low: #10243e;
+  --sl-color-accent: #2f7de1;
+  --sl-color-accent-high: #c7dcf8;
+}
+:root[data-theme="light"] {
+  --sl-color-accent-low: #d6e6fb;
+  --sl-color-accent: #1d64c4;
+  --sl-color-accent-high: #0e2f5e;
+}
+td:first-child code {
+  white-space: nowrap;
+}
+
+/* Playground */
+.pg fieldset { border: 1px solid var(--sl-color-gray-5); border-radius: 8px; padding: 0.75rem 1rem 1rem; margin: 0; }
+.pg legend { font-weight: 600; padding: 0 0.25rem; }
+.pg label { display: block; font-size: var(--sl-text-sm); margin-top: 0.5rem; }
+.pg label.pg-inline { display: inline-flex; gap: 0.4rem; align-items: center; margin: 0; }
+.pg input:not([type="checkbox"]), .pg select, .pg textarea {
+  display: block; width: 100%; margin-top: 0.2rem; padding: 0.3rem 0.5rem; font: inherit;
+  font-family: var(--sl-font-mono); font-size: var(--sl-text-xs);
+  background: var(--sl-color-black); color: var(--sl-color-white);
+  border: 1px solid var(--sl-color-gray-5); border-radius: 6px;
+}
+.pg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1rem; margin-top: 1rem; }
+.pg-preset-buttons { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.25rem; }
+.pg button { font: inherit; cursor: pointer; border-radius: 6px; }
+.pg-preset { font-size: var(--sl-text-xs) !important; padding: 0.25rem 0.6rem; background: var(--sl-color-gray-6);
+  color: var(--sl-color-white); border: 1px solid var(--sl-color-gray-5); }
+.pg-policy { margin-top: 1rem; }
+.pg-run { margin-top: 1rem; padding: 0.5rem 1.4rem; background: var(--sl-color-accent); color: var(--sl-color-black);
+  border: 0; font-weight: 600; }
+.pg button:focus-visible, .pg input:focus-visible, .pg select:focus-visible, .pg textarea:focus-visible {
+  outline: 2px solid var(--sl-color-accent); outline-offset: 2px; }
+.pg-out { margin-top: 1rem; }
+.pg-out table { margin-top: 0.5rem; }
+.pg-outcome { font-size: var(--sl-text-2xl); font-weight: 700; margin: 0; }
+.pg-ALLOW, .pg-PASS { color: #18794e; }
+.pg-DENY, .pg-FAIL { color: #c0392b; }
+.pg-REQUIRE_APPROVAL, .pg-APPROVAL, .pg-PENDING { color: #a05a00; }
+:root:not([data-theme="light"]) .pg-ALLOW, :root:not([data-theme="light"]) .pg-PASS { color: #4cc38a; }
+:root:not([data-theme="light"]) .pg-DENY, :root:not([data-theme="light"]) .pg-FAIL { color: #ff6b6b; }
+:root:not([data-theme="light"]) .pg-REQUIRE_APPROVAL, :root:not([data-theme="light"]) .pg-APPROVAL,
+:root:not([data-theme="light"]) .pg-PENDING { color: #f0a33a; }
+.pg-err { color: #c0392b; }
+.pg-meta { font-size: var(--sl-text-sm); }
+/* Starlight adds margin-top between siblings in content; not wanted in these layouts. */
+.pg-preset-buttons > *, .pg-grid > * { margin-top: 0 !important; }

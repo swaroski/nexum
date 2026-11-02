@@ -1,0 +1,53 @@
+name: Nexum security eval
+description: >-
+  Run Nexum security eval suites against your gateway's trust and policy.
+  Fails the job if any scenario fails; critical failures (authority granted
+  that should not have been) are called out in the job summary.
+branding: { icon: shield, color: blue }
+inputs:
+  config:
+    description: Path to the gateway's nexum.yaml.
+    default: nexum.yaml
+  paths:
+    description: Eval suite files or directories, space-separated.
+    default: evals
+runs:
+  using: composite
+  steps:
+    # Built from this action's own checkout, so `uses: swaroski/nexum@<ref>`
+    # pins the exact Nexum version that evaluates your policy.
+    - name: Install nexum
+      shell: bash
+      run: cargo install --locked --quiet --path "$GITHUB_ACTION_PATH/crates/nexum-cli" --root "$RUNNER_TEMP/nexum"
+    - name: Run evals
+      shell: bash
+      env:
+        NEXUM_CONFIG: ${{ inputs.config }}
+        EVAL_PATHS: ${{ inputs.paths }}
+      run: |
+        set +e
+        # shellcheck disable=SC2086 # paths are intentionally word-split
+        "$RUNNER_TEMP/nexum/bin/nexum" eval run $EVAL_PATHS --json > "$RUNNER_TEMP/nexum-eval.json"
+        status=$?
+        python3 - "$RUNNER_TEMP/nexum-eval.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+        import json, sys
+        try:
+            d = json.load(open(sys.argv[1]))
+        except Exception:
+            print("## Nexum security eval\n\nThe eval did not run; see the job log.")
+            sys.exit()
+        verdict = "BLOCKED" if d["failed"] else "PASS"
+        print(f"## Nexum security eval: {verdict}\n")
+        print(f"{d['passed']} / {d['total']} passed, {d['critical']} critical, score {d['score']:.1f}% (nexum {d['nexum_version']})\n")
+        bad = [r for r in d["results"] if not r["passed"]]
+        if bad:
+            print("| | Scenario | Expected | Actual | Invariant |\n|---|---|---|---|---|")
+            for r in bad:
+                tag = "CRITICAL" if r["critical"] else "FAIL"
+                got = r["error"] or f"{r['actual']} {r['actual_code'] or ''}"
+                print(f"| {tag} | `{r['name']}` | {r['expect']} {r['expect_code'] or ''} | {got} | {r['invariant'] or ''} |")
+        PY
+        if [ "$status" -ne 0 ]; then
+          "$RUNNER_TEMP/nexum/bin/nexum" eval run $EVAL_PATHS | grep -vE '^  PASS' || true
+        fi
+        exit "$status"

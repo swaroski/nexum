@@ -43,7 +43,7 @@ cp "$HERE/abc-policy.yaml" abc/policy.yaml
 abc trust list
 
 step "ABC starts its gateway"
-abc gateway start >gateway.log 2>&1 &
+"$NEXUM" -c abc/nexum.yaml gateway start >gateway.log 2>&1 &
 GW_PID=$!
 for _ in $(seq 50); do curl -sf "$GW/healthz" >/dev/null && break; sleep 0.1; done
 

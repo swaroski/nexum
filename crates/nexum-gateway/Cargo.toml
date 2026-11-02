@@ -12,6 +12,7 @@ nexum-core.workspace = true
 nexum-grant.workspace = true
 nexum-policy.workspace = true
 nexum-audit.workspace = true
+nexum-sim.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
@@ -25,11 +26,15 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
+opentelemetry.workspace = true
+opentelemetry-http.workspace = true
 uuid.workspace = true
 yaml_serde.workspace = true
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
+opentelemetry_sdk.workspace = true
 
 [lints]
 workspace = true

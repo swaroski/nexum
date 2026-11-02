@@ -1,0 +1,16 @@
+# Keys are placeholders: the eval sandbox replaces the calling
+# organization's keys with an ephemeral key for each scenario.
+apiVersion: nexum.dev/v1alpha1
+trust_domains:
+  acme.example:
+    issuer: https://identity.acme.example
+    keys:
+      - { kty: OKP, crv: Ed25519, x: fSrYe0f15JG4UOImZeGBv9Cty7HIcNeTH-wn4YB_FIE, kid: placeholder-acme, alg: EdDSA }
+    allow: [customer.read, refund.create, bank_account.update]
+  partner.example:
+    issuer: https://identity.partner.example
+    keys:
+      - { kty: OKP, crv: Ed25519, x: fSrYe0f15JG4UOImZeGBv9Cty7HIcNeTH-wn4YB_FIE, kid: placeholder-partner, alg: EdDSA }
+    allow: [inventory.read, pricing.read, quote.create, "mcp.erp.*", "a2a.sales.*"]
+    deny: [payment.execute, customer.export]
+    max_grant_ttl_seconds: 900

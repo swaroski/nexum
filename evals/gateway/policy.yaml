@@ -1,0 +1,32 @@
+# ACME's own support agents.
+apiVersion: nexum.dev/v1alpha1
+kind: Policy
+id: acme-support-v1
+subjects: [{ organization: acme.example }]
+rules:
+  - { id: customer-read, action: customer.read, effect: allow }
+  - { id: refund-auto, action: refund.create, effect: allow, conditions: { max_value: 500 } }
+  - { id: refund-approval, action: refund.create, effect: approval, conditions: { value_above: 500, max_value: 5000 } }
+  - { id: refund-ceiling, action: refund.create, effect: deny, conditions: { value_above: 5000 } }
+  - { id: no-bank-changes, action: bank_account.update, effect: deny }
+delegation:
+  allowed: [customer.read]
+  max_depth: 1
+---
+# What partner.example's agents may do here.
+apiVersion: nexum.dev/v1alpha1
+kind: Policy
+id: acme-partner-v1
+subjects: [{ organization: partner.example }]
+rules:
+  - { id: inventory-read, action: inventory.read, resource: "erp://acme/inventory/*", effect: allow }
+  - { id: inventory-read-mcp, action: inventory.read, resource: "mcp://erp/*", effect: allow }
+  - { id: pricing-read, action: pricing.read, resource: "erp://acme/*", effect: allow }
+  - { id: quote-auto, action: quote.create, effect: allow, conditions: { max_value: 100000 } }
+  - { id: quote-approval, action: quote.create, effect: approval, conditions: { value_above: 100000 } }
+  - { id: mcp-discovery, action: "mcp.erp.rpc.*", effect: allow }
+  - { id: a2a-messages, action: a2a.sales.message.send, effect: allow }
+  - { id: no-payments, action: payment.execute, effect: deny }
+delegation:
+  allowed: [inventory.read, pricing.read]
+  max_depth: 2

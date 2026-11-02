@@ -259,6 +259,131 @@ impl ReasonCode {
             }
         }
     }
+
+    /// The pipeline stage that produced this code, in evaluation order.
+    /// Stages before it passed; stages after it were not evaluated.
+    pub fn stage(self) -> Stage {
+        use ReasonCode::*;
+        match self {
+            ProofMissing | ProofInvalid | ProofStale | ProofReplayed | ProofBindingMismatch => {
+                Stage::Proof
+            }
+            InvalidRequest => Stage::Request,
+            CapabilityNotInChain | ResourceNotInChain | ValueExceedsGrant => Stage::Authority,
+            TrustDomainDenies => Stage::Trust,
+            PolicyAllow
+            | ApprovalRequired
+            | PolicyDeny
+            | NoMatchingPolicy
+            | DelegationForbiddenByPolicy
+            | DelegationDepthPolicy
+            | PolicyUnavailable => Stage::Policy,
+            ApprovalGranted | ApprovalInvalid => Stage::Approval,
+            AuditUnavailable => Stage::Audit,
+            GrantMissing
+            | ChainTooLong
+            | MalformedGrant
+            | UnsupportedAlgorithm
+            | InvalidSignature
+            | UnknownIssuer
+            | UnknownKey
+            | GrantExpired
+            | GrantNotYetValid
+            | GrantLifetimeTooLong
+            | WrongAudience
+            | BrokenChain
+            | CapabilityEscalation
+            | ResourceEscalation
+            | DelegationDepthExceeded
+            | LifetimeEscalation
+            | SubjectDomainMismatch
+            | ContextEscalation
+            | LimitEscalation
+            | AgentRevoked
+            | GrantRevoked
+            | TrustRevoked
+            | KeyRevoked => Stage::Chain,
+            // Usually a revocation lookup during chain verification; an
+            // approval-store failure is reported the same way.
+            StateUnavailable => Stage::Chain,
+        }
+    }
+
+    /// Stable security-event name for denials worth alerting on, or `None`
+    /// for ordinary outcomes. Names are part of the public contract.
+    pub fn security_event(self) -> Option<&'static str> {
+        use ReasonCode::*;
+        Some(match self {
+            InvalidSignature | UnsupportedAlgorithm | MalformedGrant => "invalid_signature",
+            UnknownIssuer | UnknownKey | SubjectDomainMismatch => "unknown_issuer",
+            CapabilityEscalation
+            | ResourceEscalation
+            | DelegationDepthExceeded
+            | LifetimeEscalation
+            | ContextEscalation
+            | LimitEscalation
+            | BrokenChain => "delegation_amplification_attempt",
+            ProofInvalid | ProofBindingMismatch => "credential_misuse",
+            ProofReplayed => "replay_attempt",
+            CapabilityNotInChain
+            | ResourceNotInChain
+            | ValueExceedsGrant
+            | DelegationForbiddenByPolicy
+            | DelegationDepthPolicy
+            | TrustDomainDenies => "privilege_escalation_attempt",
+            AgentRevoked | GrantRevoked | TrustRevoked | KeyRevoked => "revoked_credential_use",
+            PolicyUnavailable | AuditUnavailable | StateUnavailable => "enforcement_failure",
+            GrantMissing | ChainTooLong | GrantExpired | GrantNotYetValid
+            | GrantLifetimeTooLong | WrongAudience | ProofMissing | ProofStale | PolicyAllow
+            | ApprovalRequired | ApprovalGranted | ApprovalInvalid | PolicyDeny
+            | NoMatchingPolicy | InvalidRequest => return None,
+        })
+    }
+}
+
+/// Enforcement pipeline stages, in the order the gateway evaluates them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    /// Signatures, issuer, attenuation, validity, audience, revocation.
+    Chain,
+    /// Proof of possession: holder key, body binding, freshness, single use.
+    Proof,
+    /// The protocol message normalizes to one exact action and resource.
+    Request,
+    /// The chain carries this capability, resource and value.
+    Authority,
+    /// The receiving organization accepts this capability from the caller.
+    Trust,
+    Policy,
+    Approval,
+    Audit,
+}
+
+impl Stage {
+    pub const ALL: [Stage; 8] = [
+        Stage::Chain,
+        Stage::Proof,
+        Stage::Request,
+        Stage::Authority,
+        Stage::Trust,
+        Stage::Policy,
+        Stage::Approval,
+        Stage::Audit,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Stage::Chain => "Identity & delegation chain",
+            Stage::Proof => "Proof of possession",
+            Stage::Request => "Request normalization",
+            Stage::Authority => "Delegated authority",
+            Stage::Trust => "Organization trust",
+            Stage::Policy => "Policy",
+            Stage::Approval => "Human approval",
+            Stage::Audit => "Audit",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -396,4 +521,21 @@ pub struct AgentDescriptor {
 pub enum AgentStatus {
     Active,
     Revoked,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stages_follow_pipeline_order() {
+        use ReasonCode::*;
+        assert!(InvalidSignature.stage() < ProofReplayed.stage());
+        assert!(ProofReplayed.stage() < CapabilityNotInChain.stage());
+        assert!(CapabilityNotInChain.stage() < TrustDomainDenies.stage());
+        assert!(TrustDomainDenies.stage() < PolicyDeny.stage());
+        assert!(PolicyDeny.stage() < ApprovalInvalid.stage());
+        assert_eq!(ProofReplayed.security_event(), Some("replay_attempt"));
+        assert_eq!(PolicyAllow.security_event(), None);
+    }
 }

@@ -74,6 +74,9 @@ fn presented<'a>(headers: &HeaderMap, body: &'a [u8]) -> Presented<'a> {
         proof: h(PROOF_HEADER),
         approval_id: h(APPROVAL_HEADER),
         body,
+        trace: opentelemetry::global::get_text_map_propagator(|p| {
+            p.extract(&opentelemetry_http::HeaderExtractor(headers))
+        }),
     }
 }
 
@@ -89,7 +92,7 @@ pub struct AuthorizeBody {
     pub attributes: BTreeMap<String, Value>,
 }
 
-fn normalize_authorize(body: &[u8]) -> Result<Normalized, ReasonCode> {
+pub fn normalize_authorize(body: &[u8]) -> Result<Normalized, ReasonCode> {
     let b: AuthorizeBody = serde_json::from_slice(body).map_err(|_| ReasonCode::InvalidRequest)?;
     Ok(Normalized {
         action: Capability::parse(&b.action).map_err(|_| ReasonCode::InvalidRequest)?,

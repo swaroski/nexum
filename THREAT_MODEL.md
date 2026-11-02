@@ -235,5 +235,100 @@ exercise a mitigation are referenced as `file::test`.
 * **Mitigation:** v1 has no control plane. By design the gateway never needs
   one per request, a control plane will never hold customer signing keys or
   payloads, and the customer's local files remain the source of truth.
-* **Residual:** to be revisited when a control plane exists (signed
-  configuration bundles, customer co-signing).
+* **Residual:** to be revisited when a control plane exists. Planned design
+  (docs/PLATFORM.md section 9): outbound-only connections, configuration
+  bundles signed by the console *and* co-signed by a customer-held key, last
+  good bundle enforced while offline, never fail-open on expiry.
+
+## Platform components
+
+Threats introduced by Nexum Eval, authority tracing, the docs site and the
+planned console. None of these components is on the request path. Design:
+[docs/PLATFORM.md](docs/PLATFORM.md).
+
+### 25. Eval gives false assurance or is subverted
+* **Impact:** a policy that leaks authority ships because evals passed.
+* **Mitigation:** scenarios run the real verifier, PDP and adapters; every
+  ALLOW baseline is re-run under 12 attacks; failures that are more
+  permissive than expected are reported as critical and fail the run. The
+  sandbox uses an ephemeral issuer key, in-memory state and never calls
+  upstreams, so a suite (including one from an untrusted pull request) can't
+  read real keys, touch production state or reach the network.
+* **Residual:** evals prove only what they encode. A PR can change a policy
+  *and* its expectation together; protect `evals/`, `policy.yaml` and
+  `trust.yaml` with code owners. Passing evals is not a security review.
+
+### 26. Telemetry leaks sensitive identifiers
+* **Impact:** actor ids (often email addresses), agent ids and resource names
+  reach third-party observability backends.
+* **Mitigation:** spans and audit never contain tokens, proofs, keys, request
+  bodies, prompts or model output; agent/org/actor attributes come from the
+  verified chain only; metrics never use ids as labels; OTLP export goes over
+  plain HTTP only to a local or sidecar collector that the operator controls
+  (`https://` endpoints are refused).
+* **Residual:** actor and resource values are personal or business data.
+  Filter them in the collector if your backend is outside your boundary;
+  field-level redaction in the gateway is on the roadmap.
+
+### 27. Spoofed trace correlation
+* **Impact:** an attacker sets `traceparent` so its requests appear in someone
+  else's trace, misleading an investigation.
+* **Mitigation:** the trace id is recorded as caller-asserted, never affects a
+  decision, and `nexum trace inspect` labels it as such. Each hop's own
+  identity, chain and decision come from the verified audit event.
+* **Residual:** until the proof binds the trace id (planned `tid` claim),
+  trace membership is a hint, not evidence.
+
+### 28. Tampered audit used for explanations
+* **Impact:** a forged event makes `trace inspect` explain a decision that
+  never happened.
+* **Mitigation:** `trace inspect` verifies each audit log's hash chain before
+  reading it and refuses to explain from a log that fails. New audit fields
+  are omitted when empty, so pre-existing events keep their canonical form,
+  and adding a field to a stored event is detected as tampering.
+* **Residual:** as #21: an attacker who can rewrite the whole chain can forge
+  history. Ship audit to an append-only store.
+
+### 29. Docs, Action and console supply chain
+* **Impact:** users are misled by a compromised docs site or link; a
+  compromised Action runs in users' CI; the local console becomes a remote
+  control surface.
+* **Mitigation:** the docs site is static and has no runtime role; the CLI's
+  "Learn more" links point at the project's own GitHub Pages site. The Action
+  builds Nexum from the pinned action ref with `--locked`, uses no secrets and
+  needs only `contents: read`; pin it to a commit SHA. `nexum console` refuses
+  non-loopback binds, requires a per-session bearer token (custom header, no
+  CORS, so cross-site requests can't carry it), rejects unexpected `Host`
+  headers (DNS rebinding), sets a strict CSP and frame denial, renders all
+  audit data as text, never holds the org signing key, and performs approvals
+  and revocations through the same audited state functions as the CLI.
+* **Residual:** website npm dependencies are not covered by `cargo deny`; a
+  custom domain would need its own takeover protection. Anyone who can read
+  the console's terminal output (the token) is the operator.
+
+### 30. External policy engine (OPA)
+* **Impact:** a compromised or misconfigured OPA allows or denies the wrong
+  things; an unreachable OPA blocks traffic.
+* **Mitigation:** OPA is asked only after chain verification, proof, chain
+  authority and trust, so it can never grant what those deny. Only a boolean
+  or a strict `{outcome, policy_id, rule_id}` object is accepted; an undefined
+  rule, HTTP error, timeout (default 500 ms), redirect or oversized response is
+  `DENY NX-5002`.
+* **Residual:** OPA is trusted for everything after trust. Run it as a sidecar
+  on loopback, protect its policy bundle like `policy.yaml`, and test it with
+  `nexum eval run`.
+
+### 31. Administrative events, simulation and the playground
+* **Impact:** a misleading audit timeline; a simulation that understates the
+  impact of a change; unsafe code in the browser build.
+* **Mitigation:** administrative events are appended to the same hash chain
+  as decisions, only after the action succeeded, and the CLI exits non-zero if
+  the action happened but couldn't be audited. Simulation replays only
+  decisions that reached policy (earlier stages can't change) and reports
+  events too old to re-evaluate instead of guessing. The playground pipeline
+  is held to the gateway's results by a test on the official eval suite; its
+  `unsafe` is confined to a ~40-line wasm shim that never runs server-side.
+* **Residual:** `operator` is self-reported (OS user or `--by`/`--as`), not
+  authenticated. Administrative events need the SQLite audit provider; with
+  JSONL they are skipped with a warning. Simulation covers the built-in
+  policy engine only, not trust-store changes or OPA.

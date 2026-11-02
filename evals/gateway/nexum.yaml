@@ -1,0 +1,20 @@
+# Fixture gateway for the official security eval suite: ACME's gateway,
+# protecting its own support tools and receiving calls from a partner.
+# `nexum eval run` builds a throwaway sandbox from these files per scenario;
+# nothing here is ever served or written to.
+apiVersion: nexum.dev/v1alpha1
+server: { listen: 127.0.0.1:0 }
+gateway: { audience: acme.example }
+policy: { provider: builtin, file: policy.yaml }
+audit: { provider: sqlite, path: unused-audit.db }
+trust: { file: trust.yaml }
+state: { file: unused-state.db }
+mcp:
+  erp:
+    url: http://127.0.0.1:9/never-called
+    tools:
+      lookup_stock: { action: inventory.read }
+      create_quote: { action: quote.create, value_argument: amount }
+a2a:
+  sales:
+    url: http://127.0.0.1:9/never-called

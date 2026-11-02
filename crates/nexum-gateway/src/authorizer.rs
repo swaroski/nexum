@@ -3,18 +3,20 @@
 //! writes exactly one audit event. Every error path is a DENY.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use nexum_audit::{AuditLog, AuditRecord};
 use nexum_core::{
     ApprovalRequest, ApprovalStatus, AuthorizationDecision, AuthorizationRequest, Capability,
-    DelegationLink, GrantedAuthority, Obligation, Outcome, PolicyDecisionPoint, ReasonCode,
-    RequestContext, ResourcePattern, resources_cover, set_covers,
+    Obligation, Outcome, PolicyDecisionPoint, ReasonCode, RequestContext, ResourcePattern,
+    resources_cover, set_covers,
 };
-use nexum_grant::{Clock, MemoryReplayGuard, TrustStore, VerifiedChain, Verifier};
+use nexum_grant::{Clock, MemoryReplayGuard, TrustStore, Verifier};
 use sha2::{Digest, Sha256};
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::config::GatewaySettings;
@@ -29,6 +31,9 @@ pub struct Presented<'a> {
     pub approval_id: Option<String>,
     /// The exact bytes the proof's `bh` must hash to.
     pub body: &'a [u8],
+    /// Caller's W3C trace context (`traceparent`), if any. Only links the
+    /// decision span into the caller's trace; never affects the decision.
+    pub trace: opentelemetry::Context,
 }
 
 /// What an adapter extracted from the protocol message.
@@ -49,6 +54,9 @@ pub struct Metrics {
     pub approval: AtomicU64,
     pub audit_errors: AtomicU64,
     pub decision_micros_total: AtomicU64,
+    /// By `ReasonCode::security_event` name: a small fixed set, so it is
+    /// safe as a metric label (agent and resource ids never are).
+    pub security_events: Mutex<BTreeMap<&'static str, u64>>,
 }
 
 impl Metrics {
@@ -68,7 +76,19 @@ impl Metrics {
             g(&self.approval),
             g(&self.audit_errors),
             g(&self.decision_micros_total) as f64 / 1e6,
-        )
+        ) + &self.security_events_text()
+    }
+
+    fn security_events_text(&self) -> String {
+        let events = self
+            .security_events
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut out = String::from("# TYPE nexum_security_events_total counter\n");
+        for (name, n) in events.iter() {
+            out += &format!("nexum_security_events_total{{event=\"{name}\"}} {n}\n");
+        }
+        out
     }
 }
 
@@ -111,14 +131,73 @@ pub fn fingerprint(r: &AuthorizationRequest) -> String {
 }
 
 impl Authorizer {
+    /// Runs inside a `nexum.authorize` span carrying the decision's who/what/
+    /// why (attribute names: docs "Observability"), so log pipelines and
+    /// OpenTelemetry backends see the authority path without reading the
+    /// audit log. Credentials and payloads are never recorded.
     pub async fn authorize(
         &self,
         presented: Presented<'_>,
         normalized: Result<Normalized, ReasonCode>,
     ) -> AuthorizationDecision {
+        use opentelemetry::trace::TraceContextExt;
+        let empty = tracing::field::Empty;
+        let span = tracing::info_span!(
+            "nexum.authorize",
+            nexum.request.id = empty,
+            nexum.agent.id = empty,
+            nexum.organization.id = empty,
+            nexum.trust.domain = empty,
+            nexum.actor.id = empty,
+            nexum.action = empty,
+            nexum.resource = empty,
+            nexum.protocol = empty,
+            nexum.delegation.depth = empty,
+            nexum.policy.id = empty,
+            nexum.decision = empty,
+            nexum.reason_code = empty,
+            nexum.security_event = empty,
+        );
+        let caller = presented.trace.span().span_context().clone();
+        if let Err(e) = span.set_parent(presented.trace.clone()) {
+            tracing::debug!(error = %e, "ignoring caller trace context");
+        }
+        // The caller's trace if it sent one, else ours when OpenTelemetry is on.
+        let trace = if caller.is_valid() {
+            caller
+        } else {
+            span.context().span().span_context().clone()
+        };
+        let trace_id = trace.is_valid().then(|| trace.trace_id().to_string());
+        self.authorize_traced(presented, normalized, trace_id)
+            .instrument(span)
+            .await
+    }
+
+    async fn authorize_traced(
+        &self,
+        presented: Presented<'_>,
+        normalized: Result<Normalized, ReasonCode>,
+        trace_id: Option<String>,
+    ) -> AuthorizationDecision {
         let started = std::time::Instant::now();
         let request_id = Uuid::now_v7();
-        let (decision, record) = self.decide(request_id, presented, normalized).await;
+        let (decision, mut record) = self.decide(request_id, presented, normalized).await;
+        record.trace_id = trace_id;
+        let span = tracing::Span::current();
+        span.record("nexum.request.id", request_id.to_string());
+        span.record("nexum.agent.id", record.agent.as_deref());
+        span.record("nexum.organization.id", record.organization.as_deref());
+        span.record("nexum.trust.domain", self.settings.audience.as_str());
+        span.record("nexum.actor.id", record.actor.as_deref());
+        span.record("nexum.action", record.action.as_deref());
+        span.record("nexum.resource", record.resource.as_deref());
+        span.record("nexum.protocol", record.protocol.as_deref());
+        span.record(
+            "nexum.delegation.depth",
+            record.delegation_depth.map(|d| d as u64),
+        );
+        span.record("nexum.policy.id", record.policy.as_deref());
         let decision = match self.audit.append(record) {
             Ok(_) => decision,
             Err(e) => {
@@ -135,12 +214,25 @@ impl Authorizer {
             Outcome::RequireApproval => &m.approval,
         }
         .fetch_add(1, Ordering::Relaxed);
-        m.decision_micros_total
-            .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+        let micros = started.elapsed().as_micros() as u64;
+        m.decision_micros_total.fetch_add(micros, Ordering::Relaxed);
+        let reason = decision.primary_reason();
+        let event = reason.and_then(ReasonCode::security_event);
+        if let Some(ev) = event {
+            *m.security_events
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .entry(ev)
+                .or_default() += 1;
+        }
+        span.record("nexum.decision", decision.outcome.to_string());
+        span.record("nexum.reason_code", reason.map(ReasonCode::code));
+        span.record("nexum.security_event", event);
         tracing::info!(
-            request_id = %decision.request_id,
             outcome = %decision.outcome,
-            reason = ?decision.primary_reason(),
+            reason = reason.map(ReasonCode::code),
+            security_event = event,
+            latency_us = micros,
             "authorization decision"
         );
         decision
@@ -154,22 +246,11 @@ impl Authorizer {
     ) -> (AuthorizationDecision, AuditRecord) {
         let now = Utc::now();
         let mut record = AuditRecord {
-            event_type: "authorization.decision".into(),
             timestamp: now,
             request_id,
-            decision_id: None,
-            agent: None,
-            organization: None,
-            actor: None,
-            action: None,
-            resource: None,
             decision: Some(Outcome::Deny),
-            reason_codes: vec![],
-            delegation_depth: None,
-            policy: None,
             protocol: normalized.as_ref().ok().map(|n| n.protocol.to_owned()),
-            grant_ids: vec![],
-            approval_id: None,
+            ..AuditRecord::new("authorization.decision")
         };
         let deny = |record: &mut AuditRecord, reason| {
             let d = AuthorizationDecision::deny(request_id, reason);
@@ -198,6 +279,8 @@ impl Authorizer {
         record.actor = chain.root().act.as_ref().map(|a| a.sub.clone());
         record.delegation_depth = Some(chain.grants.len() - 1);
         record.grant_ids = chain.grants.iter().map(|g| g.jti.clone()).collect();
+        record.chain = chain.grants.iter().map(|g| g.sub.to_string()).collect();
+        record.purpose = chain.leaf().purpose.clone();
 
         let Some(proof) = presented.proof.as_deref() else {
             return (deny(&mut record, ReasonCode::ProofMissing), record);
@@ -219,8 +302,19 @@ impl Authorizer {
             Err(r) => return (deny(&mut record, r), record),
         };
         record.action = Some(n.action.to_string());
+        record.value = n.value;
         record.resource = Some(n.resource.to_string());
-        let req = build_request(request_id, now, &chain, n);
+        let req = chain.to_request(
+            request_id,
+            now,
+            n.action,
+            n.resource,
+            RequestContext {
+                value: n.value,
+                protocol: n.protocol.to_owned(),
+                attributes: n.attributes,
+            },
+        );
 
         // 3. Delegated authority: the chain must actually carry this action.
         let auth = &req.authority;
@@ -316,46 +410,5 @@ impl Authorizer {
         record.decision = Some(decision.outcome);
         record.reason_codes = decision.reason_codes.clone();
         (decision, record)
-    }
-}
-
-fn build_request(
-    request_id: Uuid,
-    now: DateTime<Utc>,
-    chain: &VerifiedChain,
-    n: Normalized,
-) -> AuthorizationRequest {
-    let (root, leaf) = (chain.root(), chain.leaf());
-    AuthorizationRequest {
-        request_id,
-        timestamp: now,
-        subject: leaf.sub.clone(),
-        actor: root.act.as_ref().map(|a| a.sub.clone()),
-        organization: root.org.clone(),
-        action: n.action,
-        resource: n.resource,
-        purpose: leaf.purpose.clone(),
-        delegation_chain: chain
-            .grants
-            .iter()
-            .map(|g| DelegationLink {
-                grant_id: g.jti.clone(),
-                issuer: g.iss.clone(),
-                subject: g.sub.clone(),
-                capabilities: g.cap.clone(),
-                expires_at: ts(g.exp),
-            })
-            .collect(),
-        authority: GrantedAuthority {
-            capabilities: leaf.cap.clone(),
-            resources: leaf.res.clone(),
-            max_value: leaf.max_value,
-            expires_at: ts(chain.earliest_expiry()),
-        },
-        context: RequestContext {
-            value: n.value,
-            protocol: n.protocol.to_owned(),
-            attributes: n.attributes,
-        },
     }
 }

@@ -1,0 +1,33 @@
+# Who is calling, and who vouched for them? The baseline also runs every
+# built-in attack: replay, stolen grant, expiry, stale proof, wrong audience,
+# untrusted issuer, unknown organization, tampering, revocation, body swap.
+apiVersion: nexum.dev/v1alpha1
+kind: EvalSuite
+category: identity
+org: partner.example
+scenarios:
+  - name: partner-agent-reads-inventory
+    description: Baseline. A partner agent with a valid root grant reads stock.
+    invariant: A correctly issued, presented and proven grant is honored.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read], res: ["erp://acme/*"] }
+    request: { action: inventory.read, resource: "erp://acme/inventory/sku-1" }
+    expect: ALLOW
+
+  - name: subject-outside-issuing-domain
+    description: partner.example vouches for an agent in someone else's domain.
+    invariant: An organization can only vouch for agents in its own trust domain.
+    grants:
+      - { sub: spiffe://evil.example/agents/impostor, cap: [inventory.read], res: ["erp://acme/*"] }
+    request: { action: inventory.read, resource: "erp://acme/inventory/sku-1" }
+    expect: DENY
+    code: NX-1017
+
+  - name: grant-lifetime-beyond-trust-limit
+    description: A root grant valid for 2 hours where ACME accepts 15 minutes.
+    invariant: The receiving organization caps how long a partner's authority lives.
+    grants:
+      - { sub: spiffe://partner.example/agents/procurement, cap: [inventory.read], res: ["erp://acme/*"], ttl_seconds: 7200 }
+    request: { action: inventory.read, resource: "erp://acme/inventory/sku-1" }
+    expect: DENY
+    code: NX-1010
