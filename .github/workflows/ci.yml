@@ -35,6 +35,10 @@ jobs:
   wasm:
     name: playground wasm builds
     runs-on: ubuntu-latest
+    env:
+      # An env RUSTFLAGS replaces .cargo/config.toml's target rustflags, so
+      # repeat the getrandom backend cfg here.
+      RUSTFLAGS: -D warnings --cfg getrandom_backend="custom"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
