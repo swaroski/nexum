@@ -10,11 +10,11 @@ license = "Apache-2.0"
 repository = "https://github.com/swaroski/nexum"
 
 [workspace.dependencies]
-nexum-core = { path = "crates/nexum-core" }
-nexum-grant = { path = "crates/nexum-grant" }
-nexum-policy = { path = "crates/nexum-policy" }
-nexum-audit = { path = "crates/nexum-audit" }
-nexum-gateway = { path = "crates/nexum-gateway" }
+nexum-core = { path = "crates/nexum-core", version = "0.1.0" }
+nexum-grant = { path = "crates/nexum-grant", version = "0.1.0" }
+nexum-policy = { path = "crates/nexum-policy", version = "0.1.0" }
+nexum-audit = { path = "crates/nexum-audit", version = "0.1.0" }
+nexum-gateway = { path = "crates/nexum-gateway", version = "0.1.0" }
 
 anyhow = "1"
 async-trait = "0.1"
