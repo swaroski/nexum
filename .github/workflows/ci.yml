@@ -66,3 +66,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f deploy/docker/Dockerfile -t nexum:ci .
+
+  action:
+    name: eval GitHub Action (dogfood)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Official suite passes
+        uses: ./
+        with:
+          config: evals/gateway/nexum.yaml
+          paths: evals
+      - name: "Weaken the policy: allow refunds over 5000"
+        run: |
+          sed -i 's/refund-ceiling, action: refund.create, effect: deny/refund-ceiling, action: refund.create, effect: allow/' evals/gateway/policy.yaml
+          grep -q "refund-ceiling.*effect: allow" evals/gateway/policy.yaml
+      - name: The weakened policy is blocked
+        id: weakened
+        continue-on-error: true
+        uses: ./
+        with:
+          config: evals/gateway/nexum.yaml
+          paths: evals
+      - if: steps.weakened.outcome != 'failure'
+        run: echo "::error::the Action did not block a policy that leaks authority" && exit 1

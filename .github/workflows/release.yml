@@ -1,0 +1,146 @@
+name: Release
+
+# Push a tag `vX.Y.Z` to publish. Running it manually (workflow_dispatch)
+# builds and checks every artifact without publishing anything.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binaries:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, musl: true }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, musl: true }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked -p nexum --target ${{ matrix.target }}
+      - name: Smoke test
+        shell: bash
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: |
+          bin=target/${{ matrix.target }}/release/nexum
+          "$bin" --version
+          dir=$(mktemp -d)
+          "$bin" init --domain release-check.example --dir "$dir" > /dev/null
+          "$bin" -c "$dir/nexum.yaml" doctor
+          "$bin" -c evals/gateway/nexum.yaml eval run evals
+      - name: Package
+        shell: bash
+        run: |
+          name=nexum-${GITHUB_REF_NAME#v}-${{ matrix.target }}
+          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && name=nexum-dev-${{ matrix.target }}
+          mkdir "$name"
+          ext=""; [[ "${{ matrix.target }}" == *windows* ]] && ext=".exe"
+          cp "target/${{ matrix.target }}/release/nexum$ext" LICENSE README.md "$name/"
+          if [[ "$ext" == ".exe" ]]; then 7z a -bd "$name.zip" "$name" > /dev/null; else tar czf "$name.tar.gz" "$name"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: nexum-*.*z*
+          if-no-files-found: error
+
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked cargo-cyclonedx
+      - run: cargo cyclonedx --format json --target all -v --override-filename nexum.cdx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: crates/nexum-cli/nexum.cdx.json
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [binaries, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum nexum-* nexum.cdx.json > SHA256SUMS && cat SHA256SUMS
+      - name: Provenance attestation (SLSA)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/nexum-*
+      - name: SBOM attestation
+        uses: actions/attest-sbom@v2
+        with:
+          subject-path: dist/nexum-*
+          sbom-path: dist/nexum.cdx.json
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "Nexum $GITHUB_REF_NAME" --generate-notes \
+            $([[ "$GITHUB_REF_NAME" == *-* || "$GITHUB_REF_NAME" == v0.* ]] && echo --prerelease)
+
+  container:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.meta.outputs.tags || 'nexum:dev' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
