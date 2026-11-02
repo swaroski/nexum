@@ -1,0 +1,33 @@
+# Supplier ABC's policy for requests arriving from XYZ Corporation's agents.
+apiVersion: nexum.dev/v1alpha1
+kind: Policy
+id: abc-supplier-v1
+subjects:
+  - organization: xyz.com
+rules:
+  - id: inventory-read
+    action: inventory.read
+    resource: "supplier://abc/*"
+    effect: allow
+  - id: pricing-read
+    action: pricing.read
+    resource: "supplier://abc/*"
+    effect: allow
+  - id: quote-auto
+    action: quote.create
+    effect: allow
+    conditions: { max_value: 100000 }
+  - id: quote-needs-approval
+    action: quote.create
+    effect: approval
+    conditions: { value_above: 100000 }
+  - id: no-payments
+    action: payment.execute
+    effect: deny
+  - id: no-exports
+    action: customer.export
+    effect: deny
+delegation:
+  # Sub-agents may only read.
+  allowed: [inventory.read, pricing.read]
+  max_depth: 2

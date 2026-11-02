@@ -1,0 +1,68 @@
+# Minimal single-replica gateway. Replace the ConfigMap contents with your own
+# nexum.yaml / trust.yaml / policy.yaml. Keep the org signing key out of the
+# cluster: the gateway only needs public keys to verify.
+#
+# Single replica on purpose: the replay cache and local state are per
+# instance in v0.1 (see THREAT_MODEL.md #9, #16).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nexum-config
+data:
+  nexum.yaml: |
+    apiVersion: nexum.dev/v1alpha1
+    server: { listen: 0.0.0.0:8080 }
+    gateway: { audience: example.com }
+    policy: { provider: builtin, file: /config/policy.yaml }
+    audit: { provider: sqlite, path: /data/audit.db }
+    trust: { file: /config/trust.yaml }
+    state: { file: /data/state.db }
+  trust.yaml: |
+    apiVersion: nexum.dev/v1alpha1
+    trust_domains: {}
+  policy.yaml: |
+    apiVersion: nexum.dev/v1alpha1
+    kind: Policy
+    id: default
+    subjects: [{ organization: "*" }]
+    rules: []
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexum
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: nexum } }
+  template:
+    metadata: { labels: { app: nexum } }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001 }
+      containers:
+        - name: nexum
+          image: nexum:dev
+          args: ["-c", "/config/nexum.yaml", "gateway", "start"]
+          ports: [{ containerPort: 8080 }]
+          readinessProbe: { httpGet: { path: /healthz, port: 8080 } }
+          livenessProbe: { httpGet: { path: /healthz, port: 8080 } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: config, mountPath: /config, readOnly: true }
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: config
+          configMap: { name: nexum-config }
+        - name: data
+          emptyDir: {}   # use a PersistentVolumeClaim to keep audit/state
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexum
+spec:
+  selector: { app: nexum }
+  ports: [{ port: 8080, targetPort: 8080 }]

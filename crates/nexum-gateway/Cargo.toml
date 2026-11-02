@@ -1,0 +1,35 @@
+[package]
+name = "nexum-gateway"
+description = "Nexum enforcement gateway: authorization pipeline, HTTP API, MCP and A2A adapters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nexum-core.workspace = true
+nexum-grant.workspace = true
+nexum-policy.workspace = true
+nexum-audit.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+yaml_serde.workspace = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true

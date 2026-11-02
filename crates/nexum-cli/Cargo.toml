@@ -1,0 +1,33 @@
+[package]
+name = "nexum"
+description = "Nexum: zero-trust authorization and delegated identity for AI agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nexum"
+path = "src/main.rs"
+
+[dependencies]
+nexum-core.workspace = true
+nexum-grant.workspace = true
+nexum-policy.workspace = true
+nexum-audit.workspace = true
+nexum-gateway.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+yaml_serde.workspace = true
+
+[lints]
+workspace = true
