@@ -6,6 +6,11 @@ break compatibility.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-02
+
+First pre-release: binaries for Linux, macOS and Windows, a container image
+at `ghcr.io/swaroski/nexum`, SBOM and build provenance attestations.
+
 ### Fixed
 - `examples/cross-company/demo.sh` left its gateway running on exit.
 - The gateway now shuts down gracefully on SIGTERM. As a container's PID 1 it

@@ -162,7 +162,9 @@ incident, from a log you can prove hasn't been altered.
 ## ⚡ Quick start
 
 ```bash
-cargo install --git https://github.com/swaroski/nexum nexum     # or use Docker, below
+# Prebuilt binary (Linux, macOS, Windows): https://github.com/swaroski/nexum/releases
+# or: docker pull ghcr.io/swaroski/nexum:0.1
+cargo install --locked --git https://github.com/swaroski/nexum --tag v0.1.0 nexum
 
 nexum init --domain example.com        # config, trust store, starter policy, org key
 nexum agents register --id spiffe://example.com/agents/support-bot --name support-bot

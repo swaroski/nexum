@@ -5,11 +5,23 @@ description: Install Nexum, issue a grant, and get your first decision.
 
 ## Install
 
+Download a prebuilt binary for Linux (x86_64, arm64), macOS (Apple Silicon,
+Intel) or Windows from the
+[releases page](https://github.com/swaroski/nexum/releases). Each release has
+`SHA256SUMS`, a CycloneDX SBOM and build provenance you can verify:
+
 ```bash
-cargo install --git https://github.com/swaroski/nexum nexum
+gh attestation verify nexum-0.1.0-x86_64-unknown-linux-musl.tar.gz --repo swaroski/nexum
 ```
 
-Or run the gateway in Docker; see [Deploy](/nexum/guides/deploy/).
+Or build from source, or run the container:
+
+```bash
+cargo install --locked --git https://github.com/swaroski/nexum --tag v0.1.0 nexum
+docker run --rm ghcr.io/swaroski/nexum:0.1 --version
+```
+
+See [Deploy](/nexum/guides/deploy/) for Docker and Kubernetes.
 
 ## One organization, one agent
 

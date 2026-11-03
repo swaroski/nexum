@@ -41,7 +41,7 @@ spec:
       securityContext: { runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001 }
       containers:
         - name: nexum
-          image: nexum:dev
+          image: ghcr.io/swaroski/nexum:0.1
           args: ["-c", "/config/nexum.yaml", "gateway", "start"]
           ports: [{ containerPort: 8080 }]
           readinessProbe: { httpGet: { path: /healthz, port: 8080 } }
