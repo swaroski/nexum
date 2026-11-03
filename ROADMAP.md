@@ -7,6 +7,54 @@ with a migration path) → **stable**. All APIs are `nexum.dev/v1alpha1` today.
 Nexum is organized as product tracks around one runtime. The runtime never
 depends on the others. Design and sequencing: [docs/PLATFORM.md](docs/PLATFORM.md).
 
+## Next up
+
+In priority order. Each item is small enough to be one pull request or one
+decision; the tracks below hold the longer-term list.
+
+**Decisions needed**
+
+1. **Identity beyond Ed25519.** SPIRE SVIDs, OIDC and RFC 8693 token exchange
+   need ES256/RS256 or mTLS, which relaxes the Ed25519-only rule. Decide the
+   algorithm policy, then build SPIRE JWT-SVID as the first holder proof.
+2. **crates.io names.** `nexum` and `nexum-core` belong to other projects.
+   Pick a prefix (e.g. `nexum-cli` + `nexum-authz-*`) or stay on GitHub
+   releases and ghcr.io only. Publishing also needs a `CARGO_REGISTRY_TOKEN`
+   secret.
+3. **`unsafe` badge.** The README says "unsafe: forbidden", true for runtime
+   crates only; the playground's wasm shim uses ~40 lines. Reword the badge,
+   or move the playground to `wasm-bindgen` and drop the shim.
+
+**Credibility**
+
+4. Independent security review of `nexum-grant` (verifier, proofs) and the
+   gateway pipeline; publish the report.
+5. Get 10–20 external developers through the cross-company demo and the
+   playground; collect where the model breaks.
+6. Benchmarks in CI: chain verification, policy evaluation, audit write,
+   end-to-end decision latency.
+
+**Runtime**
+
+7. Shared replay cache and state so more than one gateway replica can run.
+8. Native TLS/mTLS listener and rate limiting.
+9. Administrative audit events for the JSONL provider (writer lock).
+10. Envoy `ext_authz` and an HTTP reverse-proxy mode.
+
+**Eval and policy**
+
+11. Policy-impact PR comments from the GitHub Action (`policies simulate` +
+    `eval run --baseline`).
+12. `policies simulate` for trust-store changes.
+13. Cedar adapter behind `PolicyDecisionPoint`.
+
+**Developer**
+
+14. TypeScript client, then framework examples (CrewAI, Mastra, OpenAI
+    Agents SDK, Google ADK).
+15. Kubernetes and MCP server discovery.
+16. Versioned docs from v0.2; GitHub Discussions and a public RFC process.
+
 ## Shipped (v0.1)
 
 | Area | Status |
@@ -30,6 +78,7 @@ depends on the others. Design and sequencing: [docs/PLATFORM.md](docs/PLATFORM.m
 | OPA policy provider | experimental |
 | Local console, `risk scan`, passive A2A discovery | experimental |
 | Local agent registry, Python client, LangGraph example | experimental |
+| Release binaries (Linux, macOS, Windows), container on ghcr.io, SBOM, build provenance | v0.1.0 |
 
 ## Runtime
 
@@ -53,8 +102,8 @@ depends on the others. Design and sequencing: [docs/PLATFORM.md](docs/PLATFORM.m
   redaction.
 * **Performance:** benchmarks with history in CI (verification, policy,
   audit write, end-to-end).
-* **Distribution:** crates.io, GitHub Releases with checksums, SBOM and
-  provenance attestations, container registry, Homebrew, Helm.
+* **Distribution:** crates.io (see Next up), Homebrew, Helm. GitHub
+  releases, ghcr.io, SBOM and provenance shipped in v0.1.0.
 
 ## Eval
 
