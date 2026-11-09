@@ -53,7 +53,7 @@ jobs:
           ext=""; [[ "${{ matrix.target }}" == *windows* ]] && ext=".exe"
           cp "target/${{ matrix.target }}/release/nexum$ext" LICENSE README.md "$name/"
           if [[ "$ext" == ".exe" ]]; then 7z a -bd "$name.zip" "$name" > /dev/null; else tar czf "$name.tar.gz" "$name"; fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.target }}
           path: nexum-*.*z*
@@ -66,7 +66,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install --locked cargo-cyclonedx
       - run: cargo cyclonedx --format json --target all -v --override-filename nexum.cdx
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: crates/nexum-cli/nexum.cdx.json
