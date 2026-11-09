@@ -87,7 +87,7 @@ jobs:
           merge-multiple: true
       - run: cd dist && sha256sum nexum-* nexum.cdx.json > SHA256SUMS && cat SHA256SUMS
       - name: Provenance attestation (SLSA)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/nexum-*
       - name: SBOM attestation
@@ -139,7 +139,7 @@ jobs:
           sbom: true
           provenance: mode=max
       - if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.build.outputs.digest }}
