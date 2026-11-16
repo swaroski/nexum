@@ -24,7 +24,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The playground's wasm build of the decision pipeline.
       - run: cargo build --locked --profile wasm --target wasm32-unknown-unknown -p nexum-playground
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
